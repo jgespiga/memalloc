@@ -1,5 +1,4 @@
-use std::ptr;
-use std::mem;
+use std::{alloc::Layout, mem, ptr};
 use libc::{intptr_t, sbrk, c_void};
 
 /// Block header. Contains metadata about the allocated block.
@@ -22,7 +21,7 @@ struct Header {
 
 
 /// Linked list used to store memory blocks.
-struct BumpAllocator {
+pub struct BumpAllocator {
     first: *mut Header,
     last: *mut Header,
 }
@@ -44,7 +43,7 @@ impl BumpAllocator {
 
         unsafe {
             while !current.is_null() {
-                if (*current).size <= size && (*current).is_free {
+                if (*current).size >= size && (*current).is_free {
                     return current;
                 }
                 current = (*current).next;
@@ -54,13 +53,12 @@ impl BumpAllocator {
         ptr::null_mut()
     }
 
-    pub unsafe fn alloc(&mut self, size: usize) -> *mut c_void {
+    pub unsafe fn alloc(&mut self, layout: Layout) -> *mut u8 {
         unsafe {
-            let free_block = self.find_free_block(size);
-            
+            let free_block = self.find_free_block(layout.size());
             if !free_block.is_null() {
                 (*free_block).is_free = false;
-                return free_block.add(mem::size_of::<Header>()) as *mut c_void;
+                return (free_block as *mut u8).add(mem::size_of::<Header>());
             }
         }
 
@@ -68,7 +66,7 @@ impl BumpAllocator {
         // break in order to allocate a new block
 
         // We align memory size for faster access.
-        let total_size = align(mem::size_of::<Header>() + size);
+        let total_size = align(mem::size_of::<Header>() + layout.size());
         unsafe { 
             let addr: *mut c_void = sbrk(total_size as intptr_t); 
             
@@ -77,7 +75,7 @@ impl BumpAllocator {
             }
             let header = addr as *mut Header;
             
-            (*header).size = total_size;
+            (*header).size = layout.size();
             (*header).is_free = false;
             (*header).next = ptr::null_mut();
         
@@ -86,19 +84,17 @@ impl BumpAllocator {
                 self.first = header;
                 self.last = header;
             } else {
-                
                 (*self.last).next = header;
                 self.last = (*self.last).next;
-                
             }
             
-            return addr.add(mem::size_of::<Header>()); 
+            return (addr as *mut u8).add(mem::size_of::<Header>()); 
         }
     }
 
-    pub unsafe fn free(&mut self, ptr: *const c_void) -> *mut c_void {
+    pub unsafe fn free(&mut self, ptr: *mut u8) {
         if ptr.is_null() {
-            return ptr::null_mut();
+            return;
         }
 
         unsafe {
@@ -110,7 +106,7 @@ impl BumpAllocator {
             // If the block is not the last block on the list, we can't do anything
             // since we cannot remove intermediate blocks.
             if header != self.last {
-                return ptr::null_mut();
+                return;
             }
 
             if self.first == self.last {
@@ -125,9 +121,52 @@ impl BumpAllocator {
                 self.last = current;
             }
 
-            sbrk((0 - (*header).size - mem::size_of::<Header>()) as isize)
+            sbrk((0 - (*header).size - mem::size_of::<Header>()) as intptr_t);
         }
-
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn align_size() {
+        let aligments = vec![(1..8, 8), (9..16, 16), (17..24, 24), (25..32, 32)];
+
+        for (sizes, expected) in aligments {
+            for size in sizes {
+                assert_eq!(expected, align(size));
+            }
+        }
+    }
+
+    #[test]
+    fn basic_alloc() {
+        let mut allocator = BumpAllocator::new();
+        unsafe {
+            let layout = Layout::new::<u32>();
+            // Allocated space for unsigned 32 bit integer.
+            let block = allocator.alloc(layout);
+            *block = 23;
+            assert_eq!(23, *block);
+        }
+    }
+
+    #[test]
+    fn space_for_free_block_is_used() {
+        let mut allocator = BumpAllocator::new();
+        unsafe {
+            let first_block = allocator.alloc(Layout::new::<u32>());
+            let _ = allocator.alloc(Layout::new::<u64>());
+            let _ = allocator.alloc(Layout::new::<u64>());
+
+            allocator.free(first_block);
+
+            let second_block = allocator.alloc(Layout::new::<u32>());
+
+            assert_eq!(first_block, second_block);
+        }
+    }
+}
