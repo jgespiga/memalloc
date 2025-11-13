@@ -1,6 +1,5 @@
 use std::alloc::Layout;
-
-use memalloc::BumpAllocator;
+use memalloc::bump_alloc::BumpAllocator;
 
 
 fn main() {
