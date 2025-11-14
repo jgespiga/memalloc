@@ -105,7 +105,7 @@ struct Region {
 
 /// This is the structure of a block. The fields of the block are its metadata,
 /// content is placed after this header.
-
+/// ```text
 /// +----------------+
 /// |      size      |
 /// +----------------+
@@ -119,6 +119,7 @@ struct Region {
 /// |     Content    |
 /// |                |
 /// +----------------+
+/// ```
 struct Block {
     /// Size of the block.
     size: usize, 
@@ -130,6 +131,42 @@ struct Block {
     next: *mut Block,
 }
 
+impl Block {
+    unsafe fn free_list_ptr(current: *mut Block) -> *mut FreeList {
+        unsafe {
+            (current as *mut u8).add(mem::size_of::<Block>()) as *mut FreeList
+        }
+    }
+}
+
+/// Linked list to keep track of free [`Block`].
+/// 
+/// We store the pointers on the [`Block`] content for two main reasons:
+/// 
+/// 1 -> The block is free, so we can use that memory space for whatever
+///      we want since the user won't be using it. 
+/// 
+/// 2 -> We don't want to add extra overhead for the blocks which are not
+///      free. Each pointer is 8 bytes in size, so we would be having a lot
+///      of used blocks with an extra 16 bytes which are there for nothing
+///      while the block is being used by the user.
+/// 
+/// ```text
+/// 
+///    Free Block                   Next Free Block
+/// 
+///               +-----------------------------+
+///               |                             |
+/// +--------+----|---+           +--------+----|---+
+/// | Header |    ˅   |           | Header |    ˅   |
+/// +--------+--------+           +--------+--------+
+/// 
+/// ```
+/// 
+struct FreeList {
+    prev: *mut Block,
+    next: *mut Block,
+}
 
 //TODO: Refactor this into proper LinkedList without using raw pointers.
 pub struct MmapAllocator {
@@ -139,6 +176,8 @@ pub struct MmapAllocator {
     page_size: usize,
     /// Number of regions
     len: usize,
+    /// Linked list of free blocks identified by [`Block::is_free`]
+    free_list: *mut Block,
 }
 
 impl MmapAllocator {
@@ -146,13 +185,17 @@ impl MmapAllocator {
         // TODO: definitely need to refactor this.
         page_size();
         unsafe {
-            Self {regions: ptr::null_mut(), page_size: PAGE_SIZE, len: 0}
+            Self {regions: ptr::null_mut(), page_size: PAGE_SIZE, len: 0, free_list: ptr::null_mut()}
         }
     }
 
-    /// It aligns `to_be_aligned` to be a multiple of [`MmapAllocator::page_size`].
-    fn align(&self, to_be_aligned: usize) -> usize {
-        (to_be_aligned + self.page_size - 1) & !(self.page_size - 1)
+    /// It aligns `to_be_aligned` using `alignment`.
+    /// 
+    /// This method is used to align region sizes to be a multiple of [`MmapAllocator::page_size`]
+    /// and pointers in blocks to be a multiple of the computer's pointer size because memory
+    /// direcctions have to be aligned.
+    fn align(&self, to_be_aligned: usize, alignment: usize) -> usize {
+        (to_be_aligned + alignment - 1) & !(alignment - 1)
     }
 
     /// Finds a block in a given [`Region`] that can allocate
@@ -222,7 +265,7 @@ impl MmapAllocator {
         // plus the overhead introduced by out allocator's data structures
         let needed = layout.size() + block_overhead;
 
-        let region_size = self.align(needed);
+        let region_size = self.align(needed, self.page_size);
 
         const ADDR: *mut c_void = ptr::null_mut::<c_void>();
         const PROT: c_int = libc::PROT_READ | libc::PROT_WRITE;
@@ -262,7 +305,10 @@ impl MmapAllocator {
             self.regions = Box::into_raw(region);
             // We have created a new region
             self.len += 1;
+
+            self.insert_free_block(new_block);
         }
+        
 
         // should we return Result<T> here?
     }
@@ -277,7 +323,7 @@ impl MmapAllocator {
             if remaining > header_size + MIN_BLOCK_SIZE {
                 // We have to split the block.
 
-                let new_block_addr = (block as *mut u8).add(align_for_ptr(header_size + requested_size)) as *mut Block;
+                let new_block_addr = (block as *mut u8).add(self.align(header_size + requested_size, mem::size_of::<usize>())) as *mut Block;
 
                 // New free block
                 (*new_block_addr).size = remaining - header_size;
@@ -295,7 +341,7 @@ impl MmapAllocator {
                 (*block).size = requested_size;
             }
 
-            (*block).is_free = false;
+            self.remove_free_block(block);
 
             (block as *mut u8).add(header_size)
         }
@@ -318,33 +364,115 @@ impl MmapAllocator {
         unsafe { self.take_from_block(block, layout.size()) }
     }
 
+
+
+    unsafe fn insert_free_block(&mut self, block: *mut Block) {
+        
+        unsafe {
+            (*block).is_free = true;
+
+            let links = Block::free_list_ptr(block);
+
+            // We insert free block at the start of the list to avoid iterating through it.
+            (*links).prev = std::ptr::null_mut();
+            (*links).next = self.free_list;
+
+            if !self.free_list.is_null() {
+                let head_links = Block::free_list_ptr(self.free_list);
+                (*head_links).prev = block;
+            }
+
+            self.free_list = block;
+        }
+    }
+
+    unsafe fn remove_free_block(&mut self, block: *mut Block) {
+        unsafe {
+            let links = Block::free_list_ptr(block);
+            let prev = (*links).prev;
+            let next = (*links).next;
+
+            if !prev.is_null() {
+                let prev_links = Block::free_list_ptr(prev);
+                (*prev_links).next = next;
+            } else {
+                self.free_list = next;
+            }
+
+            if !next.is_null() {
+                let next_links = Block::free_list_ptr(next);
+                (*next_links).prev = prev;
+            }
+
+            (*links).prev = ptr::null_mut();
+            (*links).next = ptr::null_mut();
+            (*block).is_free = false;
+        }
+    }
+
     #[inline]
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        return;
+    unsafe fn dealloc(&mut self, ptr: *mut u8) {
+        if ptr.is_null() {
+            return;
+        }
+
+        let header_size = mem::size_of::<Block>();
+        unsafe {
+            let mut block = (ptr).sub(header_size) as *mut Block;
+
+            (*block).is_free = true;
+
+            // Should refactor this logic into another function?
+
+            // If the previous block is free, we can merge it with this one.
+            if !(*block).prev.is_null() && (*(*block).prev).is_free {
+                let prev = (*block).prev;
+
+                (*prev).size += header_size + (*block).size;
+
+                (*prev).next = (*block).next;
+                if !(*block).next.is_null() {
+                    (*(*block).next).prev = prev;
+                }
+
+                block = prev;
+            }
+
+            // Now we can try to merge it with the next block
+            if (*block).next.is_null() && (*(*block).next).is_free {
+                let next = (*block).next;
+
+                (*block).size += header_size + (*next).size;
+
+                (*block).next = (*next).next;
+                if !(*block).next.is_null() {
+                    (*(*next).next).prev = block;
+                }
+            }
+
+            self.insert_free_block(block);
+        }
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-//     #[test]
-//     fn basic_allocation_mmap() {
-//         let allocator = MmapAllocator::new();
+    #[test]
+    fn basic_allocation_mmap() {
+        unsafe {
+            let mut allocator = MmapAllocator::new();
+            let layout = Layout::new::<u32>();
+            // Allocated space for two unsigned 32 bit integer.
+            let block1 = allocator.alloc(layout);
+            let block2 = allocator.alloc(layout);
 
-//         unsafe {
-//             let layout = Layout::new::<u32>();
-//             // Allocated space for unsigned 32 bit integer.
-//             let block1 = allocator.alloc(layout);
-//             let block2 = allocator.alloc(layout);
-//             println!("{:?}", block1);
-//             println!("{:?}", block2);
+            *block1 = 2;
+            assert_eq!(*block1, 2);
 
-//             *block1 = 2;
-//             assert_eq!(*block1, 2);
-
-//             *block2 = 45;
-//             assert_eq!(*block2, 45);
-//         }
-//     }
-// }
+            *block2 = 45;
+            assert_eq!(*block2, 45);
+        }
+    }
+}
