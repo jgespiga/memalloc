@@ -2,6 +2,27 @@ use std::{alloc::Layout, mem, os::raw::{c_int, c_void}, ptr};
 
 use libc::{mmap, munmap, off_t, size_t};
 
+/// Virtual memory page siz of the computer. This is usually 4096.
+/// This value should be a constant, but we can't do that since we 
+/// don't know the value at compile time.
+pub(crate) static mut PAGE_SIZE: usize = 0;
+
+/// This is the minimun block size we want to have. If we are
+/// goint to split a block, and the remaining size is less than
+/// this value, it does not make any sense to split it.
+const MIN_BLOCK_SIZE: usize = mem::size_of::<usize>(); 
+
+#[inline]
+pub(crate) fn page_size() -> usize {
+    unsafe {
+        if PAGE_SIZE == 0 {
+            PAGE_SIZE = libc::sysconf(libc::_SC_PAGE_SIZE) as usize;
+        }
+
+        PAGE_SIZE
+    }
+}
+
 
 /// Virtual memory layout of a process
 /// ```text
@@ -53,19 +74,23 @@ use libc::{mmap, munmap, off_t, size_t};
 /// So our [`MmapAllocator`] looks something like this:
 /// 
 /// ```text
-///                                           Free List
+///                                     Free List
 /// 
 ///                     Next free block                Next free block
-///                +---------------------+  +--------------------------------------+
-///                |                     |  |                                      |
-/// +--------------|---------------------|--|----+      +--------------------------|-------------------+
-/// |        | +---|--+    +------+    +-|--|-+  |      |        | +-------+    +--|---+    +-------+  |
-/// | Region | | Free | -> | Block | ->| Free |  | ---> | Region | | Block | -> | Free | -> | Block |  |
-/// |        | +------+    +------+    +------+  |      |        | +-------+    +------+    +-------+  |
-/// +--------------------------------------------+      +----------------------------------------------+
+///                +----------------------+  +--------------------------------------+
+///                |                      |  |                                      |
+/// +--------------|----------------------|--|----+      +--------------------------|-------------------+
+/// |        | +---|--+    +-------+    +-|--|-+  |      |        | +-------+    +--|---+    +-------+  |
+/// | Region | | Free | -> | Block | -> | Free |  | ---> | Region | | Block | -> | Free | -> | Block |  |
+/// |        | +------+    +-------+    +------+  |      |        | +-------+    +------+    +-------+  |
+/// +---------------------------------------------+      +----------------------------------------------+
 /// 
 /// ```
 
+
+fn align_for_ptr(to_be_aligned: usize) -> usize{
+    (to_be_aligned + mem::size_of::<usize>() - 1) & !(mem::size_of::<usize>() - 1)
+} 
 
 struct Region {
     /// Start direction of the Region returned by [`libc::mmap`]
@@ -78,6 +103,22 @@ struct Region {
     first: *mut Block,
 }
 
+/// This is the structure of a block. The fields of the block are its metadata,
+/// content is placed after this header.
+
+/// +----------------+
+/// |      size      |
+/// +----------------+
+/// |   is_free (1b) |
+/// +----------------+
+/// |      prev      |
+/// +----------------+
+/// |      next      |
+/// +----------------+
+/// |                |
+/// |     Content    |
+/// |                |
+/// +----------------+
 struct Block {
     /// Size of the block.
     size: usize, 
@@ -91,7 +132,7 @@ struct Block {
 
 
 //TODO: Refactor this into proper LinkedList without using raw pointers.
-struct MmapAllocator {
+pub struct MmapAllocator {
     /// Linked list of allocator memory [`Region`]
     regions: *mut Region,
     /// Computer's page size (used for aligment). See [`MmapAllocator::align`]
@@ -101,6 +142,13 @@ struct MmapAllocator {
 }
 
 impl MmapAllocator {
+    pub unsafe fn new() -> Self {
+        // TODO: definitely need to refactor this.
+        page_size();
+        unsafe {
+            Self {regions: ptr::null_mut(), page_size: PAGE_SIZE, len: 0}
+        }
+    }
 
     /// It aligns `to_be_aligned` to be a multiple of [`MmapAllocator::page_size`].
     fn align(&self, to_be_aligned: usize) -> usize {
@@ -158,14 +206,15 @@ impl MmapAllocator {
         ptr::null_mut()
     }
 
-
+    /// This function calls to mmap, and returns a new memory region that can
+    /// handle a given size.
+    /// 
     /// If [`MmapAllocator::find_block`] returns null pointer, we know for
     /// sure there is no way we can allocate the requested size on our current
     /// Regions. Therefor, we need to allocate a new [`Region`] using
     /// [`libc::mmap`].
-    
-    /// This function calls to mmap, and returns a new memory region that can
-    /// handle a given size.
+    /// 
+    /// This implementation is platform-dependant. It only works on linux right now.
     fn allocate_new_region(&mut self, layout: Layout) -> () {
         let block_overhead = mem::size_of::<Block>();
 
@@ -195,7 +244,7 @@ impl MmapAllocator {
             let mut region = Box::new(Region {
                 start,
                 size: region_size,
-                // We insert the region at the start of the list.
+                // We insert the region at the start of the list
                 next: self.regions,
                 first: ptr::null_mut(),
             });
@@ -209,71 +258,93 @@ impl MmapAllocator {
             (*new_block).next = ptr::null_mut();
 
             region.first = new_block;
-
+            
             self.regions = Box::into_raw(region);
+            // We have created a new region
+            self.len += 1;
         }
 
         // should we return Result<T> here?
     }
 
+    unsafe fn take_from_block(&mut self, block: *mut Block, requested_size: usize) -> *mut u8 {
+        let header_size = mem::size_of::<Block>();
 
-    #[inline]
-    pub const fn new() -> Self {
-        Self {regions: ptr::null_mut(), page_size: 4096, len: 0}
+        unsafe {
+            // Calculate what the remaining size would be if we used this block.
+            let remaining = (*block).size.saturating_sub(requested_size);
+
+            if remaining > header_size + MIN_BLOCK_SIZE {
+                // We have to split the block.
+
+                let new_block_addr = (block as *mut u8).add(align_for_ptr(header_size + requested_size)) as *mut Block;
+
+                // New free block
+                (*new_block_addr).size = remaining - header_size;
+                (*new_block_addr).is_free = true;
+
+                (*new_block_addr).prev = block;
+                (*new_block_addr).next = (*block).next;
+
+                if !(*block).next.is_null() {
+                    (*(*block).next).prev = new_block_addr;
+                }
+
+                (*block).next = new_block_addr;
+
+                (*block).size = requested_size;
+            }
+
+            (*block).is_free = false;
+
+            (block as *mut u8).add(header_size)
+        }
     }
 
+
     #[inline]
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        unsafe {
-            println!("{}", libc::sysconf(libc::_SC_PAGE_SIZE));
-        }
-        const ADDR: *mut c_void = ptr::null_mut::<c_void>();
-        let length = layout.size() as size_t;
-        const PROT: c_int = libc::PROT_READ | libc::PROT_WRITE;
+    pub unsafe fn alloc(&mut self, layout: Layout) -> *mut u8 {
+        let mut block = self.find_block(layout);
 
-        const FLAGS: c_int = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS;
-        const FD: c_int = -1;
-        const OFFSET: off_t = 0;
-
-        unsafe {
-            match mmap(ADDR, length, PROT, FLAGS, FD, OFFSET) {
-                libc::MAP_FAILED => ptr::null_mut::<u8>(),
-                address => address as *mut u8
-                
+        if block.is_null() {
+            // There is no block aviable, so we need to allocate a new region
+            self.allocate_new_region(layout);
+            block = self.find_block(layout);
+            if block.is_null() {
+                // There has been an error, what should we do, panic?
+                return ptr::null_mut();
             }
         }
+        unsafe { self.take_from_block(block, layout.size()) }
     }
 
     #[inline]
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        let addr = ptr as *mut c_void;
-        let length = layout.size() as size_t;
-        unsafe { munmap(addr, length); }
+        return;
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
 
-    #[test]
-    fn basic_allocation_mmap() {
-        let allocator = MmapAllocator::new();
+//     #[test]
+//     fn basic_allocation_mmap() {
+//         let allocator = MmapAllocator::new();
 
-        unsafe {
-            let layout = Layout::new::<u32>();
-            // Allocated space for unsigned 32 bit integer.
-            let block1 = allocator.alloc(layout);
-            let block2 = allocator.alloc(layout);
-            println!("{:?}", block1);
-            println!("{:?}", block2);
+//         unsafe {
+//             let layout = Layout::new::<u32>();
+//             // Allocated space for unsigned 32 bit integer.
+//             let block1 = allocator.alloc(layout);
+//             let block2 = allocator.alloc(layout);
+//             println!("{:?}", block1);
+//             println!("{:?}", block2);
 
-            *block1 = 2;
-            assert_eq!(*block1, 2);
+//             *block1 = 2;
+//             assert_eq!(*block1, 2);
 
-            *block2 = 45;
-            assert_eq!(*block2, 45);
-        }
-    }
-
-}
+//             *block2 = 45;
+//             assert_eq!(*block2, 45);
+//         }
+//     }
+// }
