@@ -9,8 +9,10 @@ pub(crate) static mut PAGE_SIZE: usize = 0;
 
 /// This is the minimun block size we want to have. If we are
 /// goint to split a block, and the remaining size is less than
-/// this value, it does not make any sense to split it.
-const MIN_BLOCK_SIZE: usize = mem::size_of::<usize>(); 
+/// this value:
+/// - It does not make any sense to split it.
+/// - We wouldn't be able to store the [`FreeList`] block metadata
+const MIN_BLOCK_SIZE: usize = mem::size_of::<FreeList>(); 
 
 #[inline]
 pub(crate) fn page_size() -> usize {
@@ -51,11 +53,11 @@ pub(crate) fn page_size() -> usize {
 
 /// [`libc::mmap`] gives as memory regions aligned with the computer
 /// page size. But, we cannot use a full Region each time
-/// user allocates memory since we will we wasting a lot of 
+/// user allocates memory since we will be wasting a lot of 
 /// space. Also, we cannot assume this regions are adjacent.
 /// 
 /// Therefor, we are going to use the following data structure
-/// which consists in a LinkedList of Regions which inside of them
+/// which consists in a LinkedList of [`Region`] which inside of them
 /// have a LinkedList of [`Block`].
 /// 
 /// ```text
@@ -88,10 +90,6 @@ pub(crate) fn page_size() -> usize {
 /// ```
 
 
-fn align_for_ptr(to_be_aligned: usize) -> usize{
-    (to_be_aligned + mem::size_of::<usize>() - 1) & !(mem::size_of::<usize>() - 1)
-} 
-
 struct Region {
     /// Start direction of the Region returned by [`libc::mmap`]
     start: *mut u8,
@@ -103,7 +101,7 @@ struct Region {
     first: *mut Block,
 }
 
-/// This is the structure of a block. The fields of the block are its metadata,
+/// This is the structure of a block. The fields of the block are it's metadata,
 /// content is placed after this header.
 /// ```text
 /// +----------------+
@@ -143,10 +141,10 @@ impl Block {
 /// 
 /// We store the pointers on the [`Block`] content for two main reasons:
 /// 
-/// 1 -> The block is free, so we can use that memory space for whatever
+/// - The block is free, so we can use that memory space for whatever
 ///      we want since the user won't be using it. 
 /// 
-/// 2 -> We don't want to add extra overhead for the blocks which are not
+/// - We don't want to add extra overhead for the blocks which are not
 ///      free. Each pointer is 8 bytes in size, so we would be having a lot
 ///      of used blocks with an extra 16 bytes which are there for nothing
 ///      while the block is being used by the user.
@@ -164,8 +162,12 @@ impl Block {
 /// ```
 /// 
 struct FreeList {
+    /// Prev block on the Free List
     prev: *mut Block,
+    /// Next block on the Free List
     next: *mut Block,
+    /// List size
+    len: usize,
 }
 
 //TODO: Refactor this into proper LinkedList without using raw pointers.
@@ -198,54 +200,33 @@ impl MmapAllocator {
         (to_be_aligned + alignment - 1) & !(alignment - 1)
     }
 
-    /// Finds a block in a given [`Region`] that can allocate
-    /// the requested size.
-    fn find_block_in_region(&self, layout: Layout, region: &Region) -> *mut Block {
-        // We assume first can't be null on a region since, if this was
-        // the case, the region should have been unmapped and returned to
-        // the kernel.
-        let mut current = region.first;
-
-        unsafe {
-            while !current.is_null() {
-                if !(*current).is_free {
-                    current = (*current).next;
-                    continue;
-                }
-                
-                if (*current).size >= layout.size() {
-                    return current;
-                }
-                current = (*current).next;
-            }
-        }
-
-        ptr::null_mut()
-    }
 
     /// Returns a pointer to the [`Block`] where we can allocate `layout`.
-    /// If no Region with enough size is found, we return null pointer.
+    /// This is done by iterating through the [`FreeList`] and searching for
+    /// a block that can allocate enough `size`
     fn find_block(&self, layout: Layout) -> *mut Block {
-        if self.len == 0 {
+        if self.free_list.is_null() {
             // We have no regions created yet.
             return ptr::null_mut();
         }
 
-        let mut current = self.regions;
+        // This is the size we need, including alignment
+        let needed_size = self.align(layout.size(), mem::size_of::<usize>());
+
+        let mut current = self.free_list;
         while !current.is_null() {
             unsafe {
-                if (*current).size >= layout.size() {
-                    // We search for a block at current region.
-                    let block = self.find_block_in_region(layout, &(*current));
-
-                    if !block.is_null() {
-                        return block;
-                    }
+                if (*current).size >= needed_size {
+                    // We have found a block which has enough size
+                    return current;
                 }
-                current = (*current).next;
+                
+                let links = Block::free_list_ptr(current);
+                current = (*links).next;
             }
         }
 
+        // There is no free block we can use
         ptr::null_mut()
     }
 
@@ -279,7 +260,7 @@ impl MmapAllocator {
             if addr == libc::MAP_FAILED {
                 // TODO: We should refactor this to return Result<T> so we
                 // can propagate the error
-                return;
+                panic!("mmap failed trying to asign {} bytes", region_size);
             }
 
             let start = addr as *mut u8;
@@ -307,6 +288,7 @@ impl MmapAllocator {
             self.len += 1;
 
             self.insert_free_block(new_block);
+            println!("Allocating a new region");
         }
         
 
@@ -317,32 +299,41 @@ impl MmapAllocator {
         let header_size = mem::size_of::<Block>();
 
         unsafe {
-            // Calculate what the remaining size would be if we used this block.
-            let remaining = (*block).size.saturating_sub(requested_size);
 
-            if remaining > header_size + MIN_BLOCK_SIZE {
-                // We have to split the block.
+            // Payload size aligned
+            let requested = self.align(requested_size, mem::size_of::<usize>());
 
-                let new_block_addr = (block as *mut u8).add(self.align(header_size + requested_size, mem::size_of::<usize>())) as *mut Block;
+            // Calculate what the remaining size would be if we used this block
+            let remaining = (*block).size.saturating_sub(requested);
 
-                // New free block
-                (*new_block_addr).size = remaining - header_size;
-                (*new_block_addr).is_free = true;
-
-                (*new_block_addr).prev = block;
-                (*new_block_addr).next = (*block).next;
-
-                if !(*block).next.is_null() {
-                    (*(*block).next).prev = new_block_addr;
-                }
-
-                (*block).next = new_block_addr;
-
-                (*block).size = requested_size;
-            }
-
+            // We take the block out of the Free List.
             self.remove_free_block(block);
 
+            if remaining > header_size + MIN_BLOCK_SIZE {
+                // We have to split the block
+                let new_free_block = (block as *mut u8)
+                    .add(header_size + requested) as *mut Block;
+
+                // New free block
+                (*new_free_block).size = remaining - header_size;
+                (*new_free_block).is_free = true;
+                (*new_free_block).prev = block;
+                (*new_free_block).next = (*block).next;
+
+                
+                if !(*block).next.is_null() {
+                    (*(*block).next).prev = new_free_block;
+                }
+                
+                (*block).next = new_free_block;
+                (*block).size = requested;
+
+                // We can insert `new_free_block` on the FreeList
+                self.insert_free_block(new_free_block);
+            }
+
+            // We return a pointer to the payload.
+            // This is the address where the user will place content
             (block as *mut u8).add(header_size)
         }
     }
@@ -356,6 +347,7 @@ impl MmapAllocator {
             // There is no block aviable, so we need to allocate a new region
             self.allocate_new_region(layout);
             block = self.find_block(layout);
+            println!("Found new free flock {:?}", block);
             if block.is_null() {
                 // There has been an error, what should we do, panic?
                 return ptr::null_mut();
@@ -381,7 +373,7 @@ impl MmapAllocator {
                 let head_links = Block::free_list_ptr(self.free_list);
                 (*head_links).prev = block;
             }
-
+            println!("Inserting new free block...");
             self.free_list = block;
         }
     }
@@ -403,7 +395,7 @@ impl MmapAllocator {
                 let next_links = Block::free_list_ptr(next);
                 (*next_links).prev = prev;
             }
-
+            println!("Removing free block...");
             (*links).prev = ptr::null_mut();
             (*links).next = ptr::null_mut();
             (*block).is_free = false;
@@ -411,7 +403,7 @@ impl MmapAllocator {
     }
 
     #[inline]
-    unsafe fn dealloc(&mut self, ptr: *mut u8) {
+    pub unsafe fn dealloc(&mut self, ptr: *mut u8) {
         if ptr.is_null() {
             return;
         }
@@ -420,6 +412,11 @@ impl MmapAllocator {
         unsafe {
             let mut block = (ptr).sub(header_size) as *mut Block;
 
+            // If it is already free, we don't do anything
+            if (*block).is_free {
+                return;
+            }
+
             (*block).is_free = true;
 
             // Should refactor this logic into another function?
@@ -427,10 +424,15 @@ impl MmapAllocator {
             // If the previous block is free, we can merge it with this one.
             if !(*block).prev.is_null() && (*(*block).prev).is_free {
                 let prev = (*block).prev;
+                
+                if (*prev).size >= MIN_BLOCK_SIZE {
+                    self.remove_free_block(prev);
+                }
 
+                // TODO: I don't know what is this                
                 (*prev).size += header_size + (*block).size;
-
                 (*prev).next = (*block).next;
+
                 if !(*block).next.is_null() {
                     (*(*block).next).prev = prev;
                 }
@@ -439,18 +441,28 @@ impl MmapAllocator {
             }
 
             // Now we can try to merge it with the next block
-            if (*block).next.is_null() && (*(*block).next).is_free {
+            if !(*block).next.is_null() && (*(*block).next).is_free {
                 let next = (*block).next;
 
-                (*block).size += header_size + (*next).size;
+                if (*next).size >= MIN_BLOCK_SIZE {
+                    self.remove_free_block(next);
+                }
 
+                (*block).size += header_size + (*next).size;
                 (*block).next = (*next).next;
+
                 if !(*block).next.is_null() {
-                    (*(*next).next).prev = block;
+                    (*(*block).next).prev = block;
                 }
             }
-
-            self.insert_free_block(block);
+            
+            // Once we have finished merging all the posible blocks, we
+            // can insert the entire block on the FreeList
+            if (*block).size >= MIN_BLOCK_SIZE {
+                self.insert_free_block(block);
+            } else {
+                (*block).is_free = true;
+            }
         }
     }
 }
