@@ -13,6 +13,11 @@ fn main() {
         let block2 = allocator.alloc(layout);
         println!("{:?}", block2);
 
+        println!("Deallocating block1");
+        allocator.dealloc(block1);
+        
+        let block3 = allocator.alloc(layout);
+        println!("Should be first addr {:?}", block3);
     }
 }
 
