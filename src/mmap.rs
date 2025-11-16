@@ -191,13 +191,13 @@ impl MmapAllocator {
         }
     }
 
-    /// It aligns `to_be_aligned` using `alignment`.
+    /// It aligns `to_be_aligned` using `aligment`.
     /// 
     /// This method is used to align region sizes to be a multiple of [`MmapAllocator::page_size`]
     /// and pointers in blocks to be a multiple of the computer's pointer size because memory
     /// direcctions have to be aligned.
-    fn align(&self, to_be_aligned: usize, alignment: usize) -> usize {
-        (to_be_aligned + alignment - 1) & !(alignment - 1)
+    fn align(&self, to_be_aligned: usize, aligment: usize) -> usize {
+        (to_be_aligned + aligment - 1) & !(aligment - 1)
     }
 
 
@@ -210,7 +210,7 @@ impl MmapAllocator {
             return ptr::null_mut();
         }
 
-        // This is the size we need, including alignment
+        // This is the size we need, including aligment
         let needed_size = self.align(layout.size(), mem::size_of::<usize>());
 
         let mut current = self.free_list;
@@ -288,7 +288,8 @@ impl MmapAllocator {
             self.len += 1;
 
             self.insert_free_block(new_block);
-            println!("Allocating a new region");
+            
+            println!("Created new Region of size {}", region_size);
         }
         
 
@@ -347,7 +348,7 @@ impl MmapAllocator {
             // There is no block aviable, so we need to allocate a new region
             self.allocate_new_region(layout);
             block = self.find_block(layout);
-            println!("Found new free flock {:?}", block);
+            
             if block.is_null() {
                 // There has been an error, what should we do, panic?
                 return ptr::null_mut();
@@ -373,7 +374,7 @@ impl MmapAllocator {
                 let head_links = Block::free_list_ptr(self.free_list);
                 (*head_links).prev = block;
             }
-            println!("Inserting new free block...");
+            
             self.free_list = block;
         }
     }
@@ -395,7 +396,7 @@ impl MmapAllocator {
                 let next_links = Block::free_list_ptr(next);
                 (*next_links).prev = prev;
             }
-            println!("Removing free block...");
+            
             (*links).prev = ptr::null_mut();
             (*links).next = ptr::null_mut();
             (*block).is_free = false;
@@ -472,19 +473,139 @@ mod tests {
     use super::*;
 
     #[test]
-    fn basic_allocation_mmap() {
+    fn align_pointer_size() {
+        let aligments = vec![(1..8, 8), (9..16, 16), (17..24, 24), (25..32, 32)];
+        unsafe { 
+            let allocator = MmapAllocator::new();
+
+            for (sizes, expected) in aligments {
+                for size in sizes {
+                    assert_eq!(expected, allocator.align(size, mem::size_of::<usize>()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn align_page_size() {
+        let aligments = vec![(1..4096, 4096), (4097..8192, 8192)];
+
+        unsafe {
+            let allocator = MmapAllocator::new();
+
+            for (sizes, expected) in aligments {
+                for size in sizes {
+                    assert_eq!(expected, allocator.align(size, allocator.page_size))
+                }
+            }
+        }
+
+    }
+
+    #[test]
+    fn basic_allocation_and_write() {
         unsafe {
             let mut allocator = MmapAllocator::new();
             let layout = Layout::new::<u32>();
-            // Allocated space for two unsigned 32 bit integer.
+
+            let block1 = allocator.alloc(layout) as *mut u32;
+
+            *block1 = 12415;
+            assert_eq!(*block1, 12415);
+
+            let block2 = allocator.alloc(layout) as *mut u32;
+
+            *block2 = 36353;
+            assert_eq!(*block2, 36353);
+
+            // Check block1 has not been overwritten
+            assert_eq!(*block1, 12415);
+        }
+    }
+
+    #[test]
+    fn alloc_dealloc_reuse() {
+        unsafe {
+            let mut allocator = MmapAllocator::new();
+            let layout = Layout::new::<u64>();
+
             let block1 = allocator.alloc(layout);
+            assert!(!block1.is_null());
+
+            // We free the block
+            allocator.dealloc(block1);
+
             let block2 = allocator.alloc(layout);
+            assert!(!block2.is_null());
 
-            *block1 = 2;
-            assert_eq!(*block1, 2);
+            assert_eq!(block1, block2);
 
-            *block2 = 45;
-            assert_eq!(*block2, 45);
+            let block3 = allocator.alloc(layout);
+            assert!(!block3.is_null());
+
+            // Whe should get a different block since we haven't deallocated `block2`
+            assert_ne!(block3, block2);            
+        }
+    }
+
+    #[test]
+    fn dealloc_null() {
+        unsafe {
+            // This should not do anything, it should not panic.
+            let mut allocator = MmapAllocator::new();
+            allocator.dealloc(ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn double_free() {
+        unsafe {
+            let mut allocator = MmapAllocator::new();
+            let layout = Layout::new::<u32>();
+
+            let block1 = allocator.alloc(layout);
+            
+            allocator.dealloc(block1);
+
+            // This should not do anything since the block is already free.
+            allocator.dealloc(block1);
+
+            // Check everything continues working 
+            let block2 = allocator.alloc(layout) as *mut u32;
+            assert!(!block2.is_null());
+
+            *block2 = 124;
+            assert_eq!(*block2, 124);
+        }
+    }
+
+
+    #[test]
+    fn block_merging() {
+        unsafe {
+            let mut allocator = MmapAllocator::new();
+            
+            // Space for a block of 128 bytes
+            let layout = Layout::new::<[u8; 128]>();
+
+            let p1 = allocator.alloc(layout);
+            let p2 = allocator.alloc(layout);
+            let p3 = allocator.alloc(layout);
+
+            assert!(!p1.is_null() && !p2.is_null() && !p3.is_null());
+
+            allocator.dealloc(p1);
+            allocator.dealloc(p3);
+
+            // This should be merged with `prev` (p1) and `next` (p2)
+            allocator.dealloc(p2);
+
+            let p4 = allocator.alloc(Layout::from_size_align(400, 8).unwrap());
+            assert!(!p4.is_null());
+
+            // If blocks have been merged, the big layout we have just allocated `p4`
+            // should return `p1` as a bigger block.
+            assert_eq!(p1, p4);
         }
     }
 }
