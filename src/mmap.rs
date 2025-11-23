@@ -1,6 +1,8 @@
-use std::{alloc::Layout, mem, os::raw::{c_int, c_void}, ptr};
+use std::{alloc::Layout, mem, os::raw::{c_int, c_void}, ptr::{self, NonNull}};
 
 use libc::{mmap, munmap, off_t, size_t};
+
+use crate::{freelist::FreeList, list::{Link, List, Node}, region::{REGION_HEADER_SIZE, Region}};
 
 /// Virtual memory page siz of the computer. This is usually 4096.
 /// This value should be a constant, but we can't do that since we 
@@ -51,46 +53,10 @@ pub(crate) fn page_size() -> usize {
 
 
 
-/// [`libc::mmap`] gives as memory regions aligned with the computer
-/// page size. But, we cannot use a full Region each time
-/// user allocates memory since we will be wasting a lot of 
-/// space. Also, we cannot assume this regions are adjacent.
-/// 
-/// Therefor, we are going to use the following data structure
-/// which consists in a LinkedList of [`Region`] which inside of them
-/// have a LinkedList of [`Block`].
-/// 
-/// ```text
-/// +-----------------------------------------------+      +-----------------------------------------------+
-/// |        | +-------+    +-------+    +-------+  |      |        | +-------+    +-------+    +-------+  |
-/// | Region | | Block | -> | Block | -> | Block |  | ---> | Region | | Block | -> | Block | -> | Block |  |
-/// |        | +-------+    +-------+    +-------+  |      |        | +-------+    +-------+    +-------+  |
-/// +-----------------------------------------------+      +-----------------------------------------------+
-/// ```
-/// 
-/// We also need to keep track of the free blocks. So now we store
-/// two separate LinkedLists. One for memory [`Region`] and the other
-/// one of free [`Block`] which you can identify by the [`Block::is_free`]
-/// flag.
-/// 
-/// So our [`MmapAllocator`] looks something like this:
-/// 
-/// ```text
-///                                     Free List
-/// 
-///                     Next free block                Next free block
-///                +----------------------+  +--------------------------------------+
-///                |                      |  |                                      |
-/// +--------------|----------------------|--|----+      +--------------------------|-------------------+
-/// |        | +---|--+    +-------+    +-|--|-+  |      |        | +-------+    +--|---+    +-------+  |
-/// | Region | | Free | -> | Block | -> | Free |  | ---> | Region | | Block | -> | Free | -> | Block |  |
-/// |        | +------+    +-------+    +------+  |      |        | +-------+    +------+    +-------+  |
-/// +---------------------------------------------+      +----------------------------------------------+
-/// 
-/// ```
 
 
-struct Region {
+
+struct OldRegion {
     /// Start direction of the Region returned by [`libc::mmap`]
     start: *mut u8,
     /// Size of the region.
@@ -100,37 +66,32 @@ struct Region {
     /// Pointer to the previous Region
     prev: *mut Region,
     /// First Block in the Region
-    first: *mut Block,
+    first: List<NonNull<Block>>,
 }
+
+
 
 /// This is the structure of a block. The fields of the block are it's metadata,
 /// content is placed after this header.
 /// ```text
-/// +----------------+
-/// |      size      |
-/// +----------------+
-/// |   is_free (1b) |
-/// +----------------+
-/// |      prev      |
-/// +----------------+
-/// |      next      |
-/// +----------------+
-/// |                |
+/// +----------------+        +
+/// |      size      |        |
+/// +----------------+        |
+/// |   is_free (1b) |        | -> Header
+/// +----------------+        |
+/// |     region     |        |
+/// +----------------+        +       
 /// |     Content    |
 /// |                |
 /// +----------------+
 /// ```
-struct Block {
+pub(crate) struct Block {
     /// Size of the block.
     size: usize, 
     /// Flag to tell whether the block is free or not.
     is_free: bool,
-    /// Pointer to previous block.
-    prev: *mut Block,
-    /// Pointer to next block.
-    next: *mut Block,
     /// Region which the block belongs to
-    region: *mut Region,
+    region: NonNull<Node<Region>>,
 }
 
 impl Block {
@@ -141,49 +102,19 @@ impl Block {
     }
 }
 
-/// Linked list to keep track of free [`Block`].
-/// 
-/// We store the pointers on the [`Block`] content for two main reasons:
-/// 
-/// - The block is free, so we can use that memory space for whatever
-///      we want since the user won't be using it. 
-/// 
-/// - We don't want to add extra overhead for the blocks which are not
-///      free. Each pointer is 8 bytes in size, so we would be having a lot
-///      of used blocks with an extra 16 bytes which are there for nothing
-///      while the block is being used by the user.
-/// 
-/// ```text
-/// 
-///    Free Block                   Next Free Block
-/// 
-///               +-----------------------------+
-///               |                             |
-/// +--------+----|---+           +--------+----|---+
-/// | Header |    ˅   |           | Header |    ˅   |
-/// +--------+--------+           +--------+--------+
-/// 
-/// ```
-/// 
-struct FreeList {
-    /// Prev block on the Free List
-    prev: *mut Block,
-    /// Next block on the Free List
-    next: *mut Block,
-    /// List size
-    len: usize,
-}
+
+
+/// The FreeList is a linked list as well
+//type FreeListRefactor = List<Block>;
 
 //TODO: Refactor this into proper LinkedList without using raw pointers.
 pub struct MmapAllocator {
     /// Linked list of allocator memory [`Region`]
-    regions: *mut Region,
+    regions: List<Region>,
     /// Computer's page size (used for aligment). See [`MmapAllocator::align`]
     page_size: usize,
-    /// Number of regions
-    len: usize,
     /// Linked list of free blocks identified by [`Block::is_free`]
-    free_list: *mut Block,
+    free_list: FreeList,
 }
 
 impl MmapAllocator {
@@ -191,7 +122,7 @@ impl MmapAllocator {
         // TODO: definitely need to refactor this.
         page_size();
         unsafe {
-            Self {regions: ptr::null_mut(), page_size: PAGE_SIZE, len: 0, free_list: ptr::null_mut()}
+            Self {regions: List::new(), page_size: PAGE_SIZE, free_list: FreeList::new()}
         }
     }
 
@@ -208,30 +139,29 @@ impl MmapAllocator {
     /// Returns a pointer to the [`Block`] where we can allocate `layout`.
     /// This is done by iterating through the [`FreeList`] and searching for
     /// a block that can allocate enough `size`
-    fn find_block(&self, layout: Layout) -> *mut Block {
-        if self.free_list.is_null() {
+    fn find_block(&self, layout: Layout) -> Link<Node<Block>> {
+        if self.free_list.is_empty() {
             // We have no regions created yet.
-            return ptr::null_mut();
+            return None;
         }
 
         // This is the size we need, including aligment
         let needed_size = self.align(layout.size(), mem::size_of::<usize>());
 
-        let mut current = self.free_list;
-        while !current.is_null() {
+        let mut current = self.free_list.items.first();
+        while let Some(block) = current {
             unsafe {
-                if (*current).size >= needed_size {
-                    // We have found a block which has enough size
-                    return current;
+                // TODO: I don't know if this nested type is actually crazy or not.
+                if block.as_ref().data.as_ref().data.size >= needed_size {
+                    return Some(block.as_ref().data);
                 }
-                
-                let links = Block::free_list_ptr(current);
-                current = (*links).next;
+            
+            current = block.as_ref().next;
             }
         }
 
         // There is no free block we can use
-        ptr::null_mut()
+        None
     }
 
     /// This function calls to mmap, and returns a new memory region that can
@@ -268,39 +198,27 @@ impl MmapAllocator {
                 panic!("mmap failed trying to asign {} bytes", region_size);
             }
 
-            let start = addr as *mut u8;
+            let mut region = self.regions.append(
+                Region {
+                    size: region_size - REGION_HEADER_SIZE,
+                    blocks: List::new(),
+                },
 
-            let mut region = Box::new(Region {
-                start,
-                size: region_size,
-                // We insert the region at the start of the list
-                next: self.regions,
-                prev: ptr::null_mut(),
-                first: ptr::null_mut(),
-            });
+                NonNull::new_unchecked(addr).cast(),
+            );
 
-            // The first block is going to be marked as free to use and
-            // it fills the whole region size.
-            let new_block = start as *mut Block;
-            (*new_block).size = region_size - block_overhead;
-            (*new_block).is_free = true;
-            (*new_block).prev = ptr::null_mut();
-            (*new_block).next = ptr::null_mut();
+            let block_addr = NonNull::new_unchecked(region.as_ptr().offset(1)).cast();
 
-            region.first = new_block;
+            let block = region.as_mut().data.blocks.append(
+                Block {
+                    size: region_size - mem::size_of::<Node<Block>>(),
+                    is_free: true,
+                    region,
+                },
+                block_addr,
+            );
 
-            let region_ptr = Box::into_raw(region);
-
-            if !self.regions.is_null() {
-                (*self.regions).prev = region_ptr;
-            }
-
-            (*new_block).region = region_ptr;
-            self.regions = region_ptr;
-
-            // We have created a new region
-            self.len += 1;
-            self.insert_free_block(new_block);
+            self.free_list.insert_free_block(block, block_addr);
             
         }
         
@@ -308,7 +226,8 @@ impl MmapAllocator {
         // should we return Result<T> here?
     }
 
-    unsafe fn take_from_block(&mut self, block: *mut Block, requested_size: usize) -> *mut u8 {
+    /// Splits the given `block` if possible
+    unsafe fn take_from_block(&mut self, block: Node<Block>, requested_size: usize) -> *mut u8 {
         let header_size = mem::size_of::<Block>();
 
         unsafe {
@@ -356,64 +275,19 @@ impl MmapAllocator {
     pub unsafe fn alloc(&mut self, layout: Layout) -> *mut u8 {
         let mut block = self.find_block(layout);
 
-        if block.is_null() {
+        if block.is_none() {
             // There is no block aviable, so we need to allocate a new region
             self.allocate_new_region(layout);
             block = self.find_block(layout);
             
-            if block.is_null() {
+            if block.is_none() {
                 // There has been an error, what should we do, panic?
                 return ptr::null_mut();
             }
         }
         unsafe { self.take_from_block(block, layout.size()) }
     }
-
-
-
-    unsafe fn insert_free_block(&mut self, block: *mut Block) {
-        
-        unsafe {
-            (*block).is_free = true;
-
-            let links = Block::free_list_ptr(block);
-
-            // We insert free block at the start of the list to avoid iterating through it.
-            (*links).prev = std::ptr::null_mut();
-            (*links).next = self.free_list;
-
-            if !self.free_list.is_null() {
-                let head_links = Block::free_list_ptr(self.free_list);
-                (*head_links).prev = block;
-            }
-            
-            self.free_list = block;
-        }
-    }
-
-    unsafe fn remove_free_block(&mut self, block: *mut Block) {
-        unsafe {
-            let links = Block::free_list_ptr(block);
-            let prev = (*links).prev;
-            let next = (*links).next;
-
-            if !prev.is_null() {
-                let prev_links = Block::free_list_ptr(prev);
-                (*prev_links).next = next;
-            } else {
-                self.free_list = next;
-            }
-
-            if !next.is_null() {
-                let next_links = Block::free_list_ptr(next);
-                (*next_links).prev = prev;
-            }
-            
-            (*links).prev = ptr::null_mut();
-            (*links).next = ptr::null_mut();
-            (*block).is_free = false;
-        }
-    }
+    
 
     #[inline]
     pub unsafe fn dealloc(&mut self, ptr: *mut u8) {

@@ -1,4 +1,4 @@
-use std::{array::IntoIter, marker::PhantomData, ptr::NonNull};
+use std::{marker::PhantomData, ptr::NonNull};
 
 
 /// Non-null pointer to `T`.
@@ -26,6 +26,11 @@ pub struct Iter<'a, T> {
     marker: PhantomData<&'a T>,
 }
 
+impl<T> Node<T> {
+    pub fn new(data: T) -> Self {
+        Self { next: None, prev: None, data}
+    }
+}
 
 impl<T> List<T> {
     pub fn new() -> Self {
@@ -48,10 +53,25 @@ impl<T> List<T> {
     }
 
     #[inline]
+    pub fn last(&self) -> Link<Node<T>> {
+        self.tail
+    }
+
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
     
+    /// Appends a new node to the Linked List. 
+    /// 
+    /// It is very important for us that, because we are the actual memory
+    /// allocator, this method can not make allocations itself. Therefor, 
+    /// it has to receive the `addr` where this node has to be allocated.
+    /// 
+    /// This way, the node will we placed inside of our data structures in
+    /// the exact place we want.
+    /// 
+    /// **SAFETY**: Caller (we, as the allocator) must guarantee that the given `addr` is valid
     pub unsafe fn append(&mut self, data: T, addr: NonNull<u8>) -> NonNull<Node<T>> {
         let node = addr.cast::<Node<T>>();
         
@@ -131,5 +151,19 @@ impl<'a, T> IntoIterator for &'a List<T> {
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_list_is_empty() {
+        let list: List<u8> = List::new();
+
+        assert_eq!(list.len, 0);
+        assert!(list.is_empty());
+        assert!(list.iter().next().is_none());
     }
 }
