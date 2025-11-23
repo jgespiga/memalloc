@@ -1,2 +1,5 @@
-pub mod bump_alloc;
-pub mod mmap;
+mod bump_alloc;
+mod mmap;
+mod list;
+mod region;
+mod freelist;
