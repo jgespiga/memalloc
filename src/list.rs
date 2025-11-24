@@ -128,25 +128,27 @@ impl<T> List<T> {
         }
     } 
 
-    pub unsafe fn remove(&mut self, mut node: NonNull<Node<T>>) {
+    pub unsafe fn remove(&mut self, node: NonNull<Node<T>>) {
         unsafe {
-            if self.len == 1 {
-                self.head = None;
-                self.tail = None;
-            } else if node == self.head.unwrap() {
-                node.as_mut().prev.unwrap().as_mut().prev = None;
-                self.head = node.as_ref().next;
-            } else if node == self.tail.unwrap() {
-                node.as_mut().prev.unwrap().as_mut().next = None;
-                self.tail = node.as_ref().prev;
+            let prev = node.as_ref().prev;
+            let next = node.as_ref().next;
+
+            // Link prev -> next
+            if let Some(mut prev_node) = prev {
+                prev_node.as_mut().next = next;
             } else {
-                let mut next = node.as_ref().next.unwrap();
-                let mut prev = node.as_ref().prev.unwrap();
-                prev.as_mut().next = Some(next);
-                next.as_mut().prev = Some(prev);
+                self.head = next;
+            }
+
+            // Link next -> prev
+            if let Some(mut next_node) = next {
+                next_node.as_mut().prev = prev;
+            } else {
+                // Node was the tail
+                self.tail = prev;
             }
         }
-
+            
         self.len -= 1;
     }
 
