@@ -14,7 +14,7 @@ pub(crate) static mut PAGE_SIZE: usize = 0;
 /// this value:
 /// - It does not make any sense to split it.
 /// - We wouldn't be able to store the [`FreeList`] block metadata
-const MIN_BLOCK_SIZE: usize = mem::size_of::<FreeList>(); 
+const MIN_BLOCK_SIZE: usize = mem::size_of::<Node<NonNull<Node<Block>>>>(); 
 
 #[inline]
 pub(crate) fn page_size() -> usize {
@@ -171,7 +171,7 @@ impl MmapAllocator {
     /// 
     /// This implementation is platform-dependant. It only works on linux right now.
     fn allocate_new_region(&mut self, layout: Layout) -> () {
-        let block_overhead = mem::size_of::<Block>();
+        let block_overhead = mem::size_of::<Node<Block>>();
 
         // What we really need to allocate is the requested size (aligned)
         // plus the overhead introduced by out allocator's data structures
@@ -204,7 +204,11 @@ impl MmapAllocator {
                 NonNull::new_unchecked(addr).cast(),
             );
 
+            // First Node<Block> right after Node<Region>
             let block_addr = NonNull::new_unchecked(region.as_ptr().offset(1)).cast();
+
+            // Useful block size
+            let block_size = region.as_ref().data.size - mem::size_of::<Node<Block>>();
 
             let block = region.as_mut().data.blocks.append(
                 Block {
@@ -215,8 +219,12 @@ impl MmapAllocator {
                 block_addr,
             );
 
-            self.free_list.insert_free_block(block, block_addr);
-            
+            // We use the payload of the free block to store the node
+            let free_node_addr = NonNull::new_unchecked(
+                block.as_ptr().cast::<u8>().add(mem::size_of::<Node<Block>>())
+            );
+
+            self.free_list.insert_free_block(block, free_node_addr);
         }
         
 
@@ -281,7 +289,7 @@ impl MmapAllocator {
 
                 // We use the free block payload
                 let free_block_addr = 
-                    NonNull::new_unchecked((block.as_ptr() as *mut u8)
+                    NonNull::new_unchecked((new_block.as_ptr() as *mut u8)
                     .add(header_size));
 
                 self.free_list.insert_free_block(new_block, free_block_addr);
@@ -360,19 +368,19 @@ impl MmapAllocator {
                     if prev_block.size >= MIN_BLOCK_SIZE {
                         self.free_list.remove_free_block(prev_node);
                     }
+                    
+                    prev_block.size += header_size + block.size;
+                    
+                    let next = block_node.as_ref().next;
+                    prev_node.as_mut().next = next;
+                    
+                    if let Some(mut next_node) = next {
+                        next_node.as_mut().prev = Some(prev_node);
+                    }
+                    
+                    // The current block is now its previous one
+                    block_node = prev_node;
                 }
-
-                prev_block.size += header_size + block.size;
-
-                let next = block_node.as_ref().next;
-                prev_node.as_mut().next = next;
-
-                if let Some(mut next_node) = next {
-                    next_node.as_mut().prev = Some(prev_node);
-                }
-
-                // The current block is now its previous one
-                block_node = prev_node;
             }
 
             // Now, `block_node` is the block merged with the previous one (if there was)
