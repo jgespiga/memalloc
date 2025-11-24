@@ -328,89 +328,94 @@ impl MmapAllocator {
             return;
         }
 
-        let header_size = mem::size_of::<Block>();
+        let header_size = mem::size_of::<Node<Block>>();
+        
         unsafe {
-            let mut block = (ptr).sub(header_size) as *mut Block;
+
+            // We assume this part is a `header`, if is not, this will be UB
+            let block_node_ptr = ptr.sub(header_size) as *mut Node<Block>;
+            let mut block_node = NonNull::new_unchecked(block_node_ptr);
+
+            // Block data
+            let block = &mut block_node.as_mut().data;
 
             // If it is already free, we don't do anything
-            if (*block).is_free {
+            if block.is_free {
                 return;
             }
 
-            (*block).is_free = true;
+            block.is_free = true;
 
-            let region = (*block).region;
+            let region = block.region;
 
-            // Should refactor this logic into another function?
+            // Block merging (TODO: extract this into other functions)
 
             // If the previous block is free, we can merge it with this one.
-            if !(*block).prev.is_null() && (*(*block).prev).is_free {
-                let prev = (*block).prev;
-                
-                if (*prev).size >= MIN_BLOCK_SIZE {
-                    self.remove_free_block(prev);
+            if let Some(mut prev_node) = block_node.as_ref().prev {
+
+                let prev_block = &mut prev_node.as_mut().data;
+
+                // We remove the prev node from the free list since we are going to merge it.
+                if prev_block.is_free {
+                    if prev_block.size >= MIN_BLOCK_SIZE {
+                        self.free_list.remove_free_block(prev_node);
+                    }
                 }
 
-                // TODO: I don't know what is this                
-                (*prev).size += header_size + (*block).size;
-                (*prev).next = (*block).next;
+                prev_block.size += header_size + block.size;
 
-                if !(*block).next.is_null() {
-                    (*(*block).next).prev = prev;
+                let next = block_node.as_ref().next;
+                prev_node.as_mut().next = next;
+
+                if let Some(mut next_node) = next {
+                    next_node.as_mut().prev = Some(prev_node);
                 }
 
-                block = prev;
+                // The current block is now its previous one
+                block_node = prev_node;
             }
 
-            // Now we can try to merge it with the next block
-            if !(*block).next.is_null() && (*(*block).next).is_free {
-                let next = (*block).next;
+            // Now, `block_node` is the block merged with the previous one (if there was)
+            // Therefor, we can try to merge it with the next block
+            if let Some(mut next_node) = block_node.as_ref().next {
+                let next_block = &mut next_node.as_mut().data;
 
-                if (*next).size >= MIN_BLOCK_SIZE {
-                    self.remove_free_block(next);
-                }
+                if next_block.is_free {
+                    if next_block.size >= MIN_BLOCK_SIZE {
+                        self.free_list.remove_free_block(next_node);
+                    }
 
-                (*block).size += header_size + (*next).size;
-                (*block).next = (*next).next;
+                    block_node.as_mut().data.size += header_size + next_block.size;
+                    
+                    block_node.as_mut().next = next_node.as_ref().next;
 
-                if !(*block).next.is_null() {
-                    (*(*block).next).prev = block;
+                    if let Some(mut next_next) = block_node.as_ref().next {
+                        next_next.as_mut().prev = Some(block_node);
+                    }
                 }
             }
-            
+
 
             // Now we have to check if the region has only one free block.
-            // In that case, we need to delete the region from the Linked List
-            // and call `munmap` on it.
+            // In that case, we need to delete the region from the Linked List and call `munmap` on it.
+            if block_node.as_ref().prev.is_none() && block_node.as_ref().next.is_none() {
+                
+                let total_region_size = region.as_ref().data.size + REGION_HEADER_SIZE;
 
-            if (*block).prev.is_null() && (*block).next.is_null() {
-                // The current Region is free, so we can munmap it
+                self.regions.remove(region);
 
-                let prev_region = (*region).prev;
-                let next_region = (*region).next;
+                let region_start = region.as_ptr() as *mut u8;
 
-                if !prev_region.is_null() {
-                    (*prev_region).next = next_region;
-                } else {
-                    self.regions = next_region;
-                }
-
-                if !next_region.is_null() {
-                    (*next_region).prev = prev_region;
-                }
-
-                // We have deleted the Region
-                self.len -= 1;
-
-                munmap((*region).start as *mut c_void, (*region).size as size_t);
-
-                // Free the Region struct (TODO: I'm not sure about this)
-                let _ = Box::from_raw(region);
+                munmap(region_start as *mut c_void, total_region_size as size_t);
             } else {
-                // If the current Region still in use:
-                // Once we have finished merging all the posible blocks, we
-                // can insert the entire block on the FreeList
-                self.insert_free_block(block);  
+                // The current region still has other blocks so the merged block has to return to the free list.
+
+                // We use the free block payload
+                let free_block_addr = 
+                    NonNull::new_unchecked((block_node.as_ptr() as *mut u8)
+                    .add(header_size));
+
+                self.free_list.insert_free_block(block_node, free_block_addr);
             }
         }
     }
@@ -568,12 +573,12 @@ mod tests {
             let p1 = allocator.alloc(layout);
             let p2 = allocator.alloc(layout);
 
-            assert!(!allocator.regions.is_null());
+            assert!(!allocator.regions.is_empty());
 
             allocator.dealloc(p1);
             allocator.dealloc(p2);
 
-            assert!(allocator.regions.is_null());
+            assert!(allocator.regions.is_empty());
         }
     }
 }
