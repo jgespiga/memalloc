@@ -53,9 +53,6 @@ pub(crate) fn page_size() -> usize {
 
 
 
-
-
-
 struct OldRegion {
     /// Start direction of the Region returned by [`libc::mmap`]
     start: *mut u8,
@@ -87,11 +84,11 @@ struct OldRegion {
 /// ```
 pub(crate) struct Block {
     /// Size of the block.
-    size: usize, 
+    pub size: usize, 
     /// Flag to tell whether the block is free or not.
-    is_free: bool,
+    pub is_free: bool,
     /// Region which the block belongs to
-    region: NonNull<Node<Region>>,
+    pub region: NonNull<Node<Region>>,
 }
 
 impl Block {
@@ -227,8 +224,29 @@ impl MmapAllocator {
     }
 
     /// Splits the given `block` if possible
-    unsafe fn take_from_block(&mut self, block: Node<Block>, requested_size: usize) -> *mut u8 {
-        let header_size = mem::size_of::<Block>();
+    /// 
+    /// ```text
+    /// 
+    ///  +----------------> Given addr                                          
+    ///  |                                                                                   +-----> Returned addr
+    ///  |          +-----> Start of the block                                               |
+    ///  |          |                                                                        |
+    ///  +-------------------------------------------------+                      +----------+---------+---------+------------------+ 
+    ///  |          |                                      |      We split it     |          |         |         |                  |
+    ///  |  Header  |            Free Block                | -------------------> |  Header  |  Block  |  Header |    Free Block    |        
+    ///  |          |                                      |                      |          |         |         |                  |
+    ///  +-------------------------------------------------+                      +----------+---------+---------+------------------+
+    ///                                                                                                |
+    ///                                                                                                |
+    ///                                                                                                +-----> New block created 
+    /// ```
+    /// 
+    /// The new block that has been created must be added both to the [`FreeList`], since it is not used yet, and 
+    /// to the actual [`Region::blocks`], since it is a new block of the current region
+    /// 
+    /// The payload of the free block is used to store the data we need. See [`FreeList`] for greater detail.
+    unsafe fn take_from_block(&mut self, mut block: NonNull<Node<Block>>, requested_size: usize) -> *mut u8 {
+        let header_size = mem::size_of::<Node<Block>>();
 
         unsafe {
 
@@ -236,37 +254,45 @@ impl MmapAllocator {
             let requested = self.align(requested_size, mem::size_of::<usize>());
 
             // Calculate what the remaining size would be if we used this block
-            let remaining = (*block).size.saturating_sub(requested);
+            let remaining = block.as_ref().data.size.saturating_sub(requested);
 
-            // We take the block out of the Free List.
-            self.remove_free_block(block);
+            // We take the block out of the Free List
+            self.free_list.remove_free_block(block);
 
             if remaining > header_size + MIN_BLOCK_SIZE {
                 // We have to split the block
-                let new_free_block = (block as *mut u8)
-                    .add(header_size + requested) as *mut Block;
+                let new_node_addr: NonNull<u8> = 
+                    NonNull::new_unchecked((block.as_ptr() as *mut u8)
+                    .add(header_size + requested));
 
-                // New free block
-                (*new_free_block).size = remaining - header_size;
-                (*new_free_block).is_free = true;
-                (*new_free_block).prev = block;
-                (*new_free_block).next = (*block).next;
-                (*new_free_block).region = (*block).region;
+                let new_block_size = remaining - header_size;
 
-                if !(*block).next.is_null() {
-                    (*(*block).next).prev = new_free_block;
-                }
-                
-                (*block).next = new_free_block;
-                (*block).size = requested;
+                let region = block.as_mut().data.region.as_mut();
 
-                // We can insert `new_free_block` on the FreeList
-                self.insert_free_block(new_free_block);
+                let new_block = region.data.blocks.insert_after(
+                    block,
+                    Block {
+                        size: new_block_size,
+                        is_free: true,
+                        region: block.as_mut().data.region,
+                    },
+                    new_node_addr.cast()
+                );
+
+                // We use the free block payload
+                let free_block_addr = 
+                    NonNull::new_unchecked((block.as_ptr() as *mut u8)
+                    .add(header_size));
+
+                self.free_list.insert_free_block(new_block, free_block_addr);
+            } else {
+                // Splitting is not worth it
+                block.as_mut().data.is_free = false;
             }
 
             // We return a pointer to the payload.
             // This is the address where the user will place content
-            (block as *mut u8).add(header_size)
+            (block.as_ptr() as *mut u8).add(header_size)
         }
     }
 
@@ -285,7 +311,14 @@ impl MmapAllocator {
                 return ptr::null_mut();
             }
         }
-        unsafe { self.take_from_block(block, layout.size()) }
+
+        // It doesn't have any sense to call this function unless `block` is not None
+        if let Some(block) = block {
+            unsafe { self.take_from_block(block, layout.size()) } 
+        } else {
+            // Error?
+            panic!("Todo");
+        }
     }
     
 

@@ -95,6 +95,39 @@ impl<T> List<T> {
         }
     }
 
+    /// Inserts a new block right after the given `node` in the list. 
+    /// 
+    /// **SAFETY**: Caller must guarantee that `node` is an actual block of the list.
+    pub unsafe fn insert_after(
+        &mut self, 
+        mut node: NonNull<Node<T>>, 
+        data: T, 
+        addr: NonNull<u8>
+    ) -> NonNull<Node<T>> {
+        let new = addr.cast::<Node<T>>();
+
+        unsafe {
+            let next = node.as_mut().next;
+
+            new.as_ptr().write(Node {
+                prev: Some(node),
+                next,
+                data,
+            });
+
+            node.as_mut().next = Some(new);
+
+            if let Some(mut next_node) = next {
+                next_node.as_mut().prev = Some(new);
+            } else {
+                self.tail = Some(new);
+            }
+
+            self.len += 1;
+            new
+        }
+    } 
+
     pub unsafe fn remove(&mut self, mut node: NonNull<Node<T>>) {
         unsafe {
             if self.len == 1 {
