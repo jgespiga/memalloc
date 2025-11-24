@@ -12,7 +12,6 @@ pub(crate) struct Node<T> {
     /// Element of the node
     pub data: T,
 }
-
 pub(crate) struct List<T> {
     head: Link<Node<T>>,
     tail: Link<Node<T>>,

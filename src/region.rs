@@ -27,7 +27,6 @@ pub(crate) const REGION_HEADER_SIZE: usize = mem::size_of::<Node<Region>>();
 /// |        | +-------+    +-------+    +-------+  |      |        | +-------+    +-------+    +-------+  |
 /// +-----------------------------------------------+      +-----------------------------------------------+
 /// ```
-
 pub struct Region {
     /// Size of the region
     pub size: usize,

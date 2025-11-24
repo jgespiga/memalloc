@@ -95,23 +95,16 @@ impl FreeList {
     /// pointers but, we are given a block we want to remove since that's the "high-level"
     /// view the allocator has on the block that it wants to take.
     /// 
-    /// 
-    /// **SAFETY**: Caller must guarantee that node is actually a free block
-    /// 
     /// See [`List::remove`] for more detail about how the actual removal works.
-    pub fn remove_free_block(&mut self, mut node: NonNull<Node<Block>>) {
+    pub fn remove_free_block(&mut self, node: NonNull<Node<Block>>) {
         let mut current = self.items.first();
 
         while let Some(free_node) = current {
             unsafe {
                 if free_node.as_ref().data == node {
-                    // We found the block in the FreeList
-
-                    // Mark the block as used
-                    node.as_mut().data.is_free = false;
-
-                    // Remove the block from the list
+                    // We found the block in the FreeList so we remove it
                     self.items.remove(free_node);
+
                     return;
                 }
 
