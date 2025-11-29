@@ -77,20 +77,6 @@ pub(crate) struct Block {
     pub region: NonNull<Node<Region>>,
 }
 
-impl Block {
-    unsafe fn free_list_ptr(current: *mut Block) -> *mut FreeList {
-        unsafe {
-            (current as *mut u8).add(mem::size_of::<Block>()) as *mut FreeList
-        }
-    }
-}
-
-
-
-/// The FreeList is a linked list as well
-//type FreeListRefactor = List<Block>;
-
-//TODO: Refactor this into proper LinkedList without using raw pointers.
 pub struct MmapAllocator {
     /// Linked list of allocator memory [`Region`]
     regions: List<Region>,
@@ -141,17 +127,16 @@ impl MmapAllocator {
         
         //TODO: for node in &self.free_list.items {}
 
-        let mut current = self.free_list.items.first();
-        while let Some(block) = current {
+        // We check in our free_list if there exists any node that can fit `needed_size`
+        for node in &self.free_list.items {
             unsafe {
-                // TODO: I don't know if this nested type is actually crazy or not.
-                if block.as_ref().data.as_ref().data.size >= needed_size {
-                    return Some(block.as_ref().data);
+                if node.as_ref().data.size >= needed_size {
+                    // We found a node that we can use
+                    return Some(*node);
                 }
-            
-            current = block.as_ref().next;
             }
         }
+
 
         // There is no free block we can use
         None
