@@ -125,7 +125,6 @@ impl MmapAllocator {
         // small memory requests.
         let needed_size = std::cmp::max(layout_size, MIN_BLOCK_SIZE);
         
-        //TODO: for node in &self.free_list.items {}
 
         // We check in our free_list if there exists any node that can fit `needed_size`
         for node in &self.free_list.items {
@@ -151,7 +150,7 @@ impl MmapAllocator {
     /// [`libc::mmap`].
     /// 
     /// This implementation is platform-dependant. It only works on linux right now.
-    fn allocate_new_region(&mut self, layout: Layout) -> () {
+    fn allocate_new_region(&mut self, layout: Layout) -> Result<(), &'static str> {
         let block_overhead = mem::size_of::<Node<Block>>();
 
         // What we really need to allocate is the requested size (aligned)
@@ -177,9 +176,7 @@ impl MmapAllocator {
             let addr = mmap(ADDR, region_size as size_t, PROT, FLAGS, FD, OFFSET);
             
             if addr == libc::MAP_FAILED {
-                // TODO: We should refactor this to return Result<T> so we
-                // can propagate the error
-                panic!("mmap failed trying to asign {} bytes", region_size);
+                return Err("mmap syscall failed");
             }
 
             let mut region = self.regions.append(
@@ -214,8 +211,7 @@ impl MmapAllocator {
             self.free_list.insert_free_block(block, free_node_addr);
         }
         
-
-        // should we return Result<T> here?
+        Ok(())
     }
 
     /// Splits the given `block` if possible
@@ -304,7 +300,7 @@ impl MmapAllocator {
 
         if block.is_none() {
             // There is no block aviable, so we need to allocate a new region
-            self.allocate_new_region(layout);
+            self.allocate_new_region(layout).unwrap();
             block = self.find_free_block(layout);
             
             if block.is_none() {
