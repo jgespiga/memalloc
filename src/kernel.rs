@@ -6,27 +6,6 @@ use crate::{freelist::FreeList, list::List, region::Region};
 /// don't know the value at compile time.
 pub(crate) static mut PAGE_SIZE: usize = 0;
 
-#[inline]
-pub(crate) fn page_size() -> usize {
-    unsafe {
-        if PAGE_SIZE == 0 {
-            PAGE_SIZE = Kernel::page_size();
-        }
-
-        PAGE_SIZE
-    }
-}
-
-
-trait PlatformMemory {
-    unsafe fn request_memory(len: usize) -> Option<NonNull<u8>>;
-
-    unsafe fn return_memory(addr: *mut u8, len: usize);
-
-    unsafe fn page_size() -> usize;
-}
-
-
 /// The internal data structure of the allocator. Here is where
 /// we manage the low level memory request as well as platform-dependant
 /// stuff.
@@ -39,7 +18,28 @@ pub(crate) struct Kernel {
     pub free_list: FreeList,
 }
 
+/// This trait provides an abstraction to handle low level memory operations
+/// and syscalls. As the allocator, our top level view of this, has nothing
+/// to do with the concrete implementations / APIs offered by each kernel.
+trait PlatformMemory {
+    /// Request a memory region of size `len`. It returns a Pointer to the 
+    /// given location or None if the underlying syscall fails.
+    unsafe fn request_memory(len: usize) -> Option<NonNull<u8>>;
+
+    /// Returns the memory of size `len` starting from `addr` back to the kernel.
+    unsafe fn return_memory(addr: *mut u8, len: usize);
+
+    /// Returns the virtual memory page size of the computer in bytes.
+    unsafe fn page_size() -> usize;
+}
+
+
 impl Kernel {
+    /// Create a new instance of the allocator's `Kernel`. 
+    /// 
+    /// When created, it will calculate the computer's page size and 
+    /// initialize both the free list and the regions list to be 
+    /// new empty [`FreeList`] and [`List`] datastructures.
     pub(crate) fn new() -> Self {
         page_size();
         unsafe {
@@ -52,7 +52,17 @@ impl Kernel {
     }
 }
 
+/// Wrapper to calculate the computer's page size.
+#[inline]
+pub(crate) fn page_size() -> usize {
+    unsafe {
+        if PAGE_SIZE == 0 {
+            PAGE_SIZE = Kernel::page_size();
+        }
 
+        PAGE_SIZE
+    }
+}
 
 /// Wrapper to use [`Kernel::request_memory`] 
 #[inline]
@@ -76,7 +86,9 @@ mod unix {
 
     impl PlatformMemory for Kernel {
         unsafe fn request_memory(len: usize) -> Option<NonNull<u8>> {
+            // mmap parameters.
             const ADDR: *mut c_void = std::ptr::null_mut::<c_void>();
+            // Read-Write only memory.
             const PROT: c_int = libc::PROT_READ | libc::PROT_WRITE;
             const FLAGS: c_int = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS;
             const FD: c_int = -1;
