@@ -188,16 +188,218 @@ impl<'a, T> IntoIterator for &'a List<T> {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::alloc::{alloc, dealloc, Layout};
+
+    // The problem with testing this [`List`] is that, as detailed avobe, as we
+    // are the allocator we cannot make allocations by ourselves. Because of that,
+    // we need to simulate what our allocator will do in order to have a valid address
+    // we can give to each node on our linked list.
+    // 
+    // Therefor, we will use `std::alloc` and `std::dealloc` to test our list.
+
+    /// Helper function to get a new memory address for a new node
+    unsafe fn get_memory_for_node<T>() -> NonNull<u8> {
+        unsafe {
+            let layout = Layout::new::<Node<T>>();
+            let ptr = alloc(layout);
+            if ptr.is_null() {
+                panic!("Falló la asignación de memoria para el test");
+            }
+            NonNull::new_unchecked(ptr)
+        }
+    }
+
+    /// Helper to clean up the memory allocated for the `node`
+    unsafe fn clean_up_node<T>(node: NonNull<Node<T>>) {
+        unsafe {
+            let ptr = node.as_ptr() as *mut u8;
+            let layout = Layout::new::<Node<T>>();
+            dealloc(ptr, layout);
+        }
+    }
 
     #[test]
     fn new_list_is_empty() {
-        let list: List<u8> = List::new();
-
-        assert_eq!(list.len, 0);
+        let list: List<i32> = List::new();
         assert!(list.is_empty());
-        assert!(list.iter().next().is_none());
+        assert_eq!(list.len(), 0);
+        assert!(list.head.is_none());
+        assert!(list.tail.is_none());
+    }
+
+    #[test]
+    fn append_single_element() {
+        unsafe {
+            let mut list = List::<i32>::new();
+            let mem = get_memory_for_node::<i32>();
+            
+            list.append(42, mem);
+
+            assert_eq!(list.len(), 1);
+            assert!(!list.is_empty());
+            
+            assert_eq!(list.head, list.tail);
+            
+            assert_eq!(list.head.unwrap().as_ref().data, 42);
+            
+            clean_up_node(list.head.unwrap());
+        }
+    }
+
+    #[test]
+    fn append_multiple_elements_and_iter() {
+        unsafe {
+            let mut list = List::<i32>::new();
+            
+            let nodes_data = vec![1, 2, 3];
+            let mut node_ptrs = Vec::new();
+
+            for &data in &nodes_data {
+                let mem = get_memory_for_node::<i32>();
+                let node = list.append(data, mem);
+                node_ptrs.push(node);
+            }
+
+            assert_eq!(list.len(), 3);
+
+            let collected: Vec<&i32> = list.iter().collect();
+            assert_eq!(collected, vec![&1, &2, &3]);
+
+            let node1 = node_ptrs[0].as_ref();
+            let node2 = node_ptrs[1].as_ref();
+            let node3 = node_ptrs[2].as_ref();
+
+            // 1 -> 2
+            assert_eq!(node1.next, Some(node_ptrs[1]));
+            assert_eq!(node1.prev, None);
+
+            // 1 <- 2 -> 3
+            assert_eq!(node2.prev, Some(node_ptrs[0]));
+            assert_eq!(node2.next, Some(node_ptrs[2]));
+
+            // 2 <- 3
+            assert_eq!(node3.prev, Some(node_ptrs[1]));
+            assert_eq!(node3.next, None);
+
+            for node in node_ptrs {
+                clean_up_node(node);
+            }
+        }
+    }
+
+    #[test]
+    fn remove_head() {
+        unsafe {
+            let mut list = List::<i32>::new();
+            let n1 = list.append(10, get_memory_for_node::<i32>());
+            let n2 = list.append(20, get_memory_for_node::<i32>());
+
+            assert_eq!(list.len(), 2);
+
+            list.remove(n1);
+
+            assert_eq!(list.len(), 1);
+            assert_eq!(list.head, Some(n2));
+            assert_eq!(list.tail, Some(n2));
+            assert_eq!(n2.as_ref().prev, None);
+
+            clean_up_node(n1);
+            clean_up_node(n2);
+        }
+    }
+
+    #[test]
+    fn remove_tail() {
+        unsafe {
+            let mut list = List::<i32>::new();
+            let n1 = list.append(10, get_memory_for_node::<i32>());
+            let n2 = list.append(20, get_memory_for_node::<i32>());
+
+            list.remove(n2);
+
+            assert_eq!(list.len(), 1);
+            assert_eq!(list.tail, Some(n1));
+            assert_eq!(list.head, Some(n1));
+            assert_eq!(n1.as_ref().next, None);
+
+            clean_up_node(n1);
+            clean_up_node(n2);
+        }
+    }
+
+    #[test]
+    fn remove_middle() {
+        unsafe {
+            let mut list = List::<i32>::new();
+            let n1 = list.append(10, get_memory_for_node::<i32>());
+            let n2 = list.append(20, get_memory_for_node::<i32>());
+            let n3 = list.append(30, get_memory_for_node::<i32>());
+
+            
+            list.remove(n2);
+
+            assert_eq!(list.len(), 2);
+            
+            assert_eq!(n1.as_ref().next, Some(n3));
+            assert_eq!(n3.as_ref().prev, Some(n1));
+
+            clean_up_node(n1);
+            clean_up_node(n2);
+            clean_up_node(n3);
+        }
+    }
+
+    #[test]
+    fn test_insert_after() {
+        unsafe {
+            let mut list = List::<i32>::new();
+            
+            let n1 = list.append(10, get_memory_for_node::<i32>());
+            
+            let n2 = list.insert_after(n1, 20, get_memory_for_node::<i32>());
+            
+            assert_eq!(list.len(), 2);
+            assert_eq!(list.tail, Some(n2));
+            assert_eq!(n1.as_ref().next, Some(n2));
+            assert_eq!(n2.as_ref().prev, Some(n1));
+
+            let n1_5 = list.insert_after(n1, 15, get_memory_for_node::<i32>());
+
+            assert_eq!(list.len(), 3);
+            
+            let vec: Vec<&i32> = list.iter().collect();
+            assert_eq!(vec, vec![&10, &15, &20]);
+
+            // 10 -> 15
+            assert_eq!(n1.as_ref().next, Some(n1_5));
+            // 15 -> 20
+            assert_eq!(n1_5.as_ref().next, Some(n2));
+            // 15 <- 20
+            assert_eq!(n2.as_ref().prev, Some(n1_5));
+
+            clean_up_node(n1);
+            clean_up_node(n1_5);
+            clean_up_node(n2);
+        }
+    }
+
+    #[test]
+    fn remove_last_remaining_node() {
+        unsafe {
+            let mut list = List::<i32>::new();
+            let n1 = list.append(99, get_memory_for_node::<i32>());
+
+            list.remove(n1);
+
+            assert!(list.is_empty());
+            assert!(list.head.is_none());
+            assert!(list.tail.is_none());
+
+            clean_up_node(n1);
+        }
     }
 }

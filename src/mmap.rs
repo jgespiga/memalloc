@@ -357,7 +357,6 @@ impl MmapAllocator {
             // Now we have to check if the region has only one free block.
             // In that case, we need to delete the region from the Linked List and call `munmap` on it.
             if block_node.as_ref().prev.is_none() && block_node.as_ref().next.is_none() {
-                println!("Borrando region");
                 let total_region_size = region.as_ref().data.size + REGION_HEADER_SIZE;
 
                 // Just in case the block stills in the free list, we always remove it just in case.
