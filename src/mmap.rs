@@ -2,12 +2,8 @@ use std::{alloc::Layout, mem, os::raw::{c_int, c_void}, ptr::{self, NonNull}};
 
 use libc::{mmap, munmap, off_t, size_t};
 
-use crate::{freelist::FreeList, list::{Link, List, Node}, region::{REGION_HEADER_SIZE, Region}};
+use crate::{freelist::FreeList, kernel::Kernel, list::{Link, List, Node}, region::{REGION_HEADER_SIZE, Region}};
 
-/// Virtual memory page siz of the computer. This is usually 4096.
-/// This value should be a constant, but we can't do that since we 
-/// don't know the value at compile time.
-pub(crate) static mut PAGE_SIZE: usize = 0;
 
 /// This is the minimun block size we want to have. If we are
 /// goint to split a block, and the remaining size is less than
@@ -16,16 +12,6 @@ pub(crate) static mut PAGE_SIZE: usize = 0;
 /// - We wouldn't be able to store the [`FreeList`] block metadata
 const MIN_BLOCK_SIZE: usize = mem::size_of::<Node<NonNull<Node<Block>>>>(); 
 
-#[inline]
-pub(crate) fn page_size() -> usize {
-    unsafe {
-        if PAGE_SIZE == 0 {
-            PAGE_SIZE = libc::sysconf(libc::_SC_PAGE_SIZE) as usize;
-        }
-
-        PAGE_SIZE
-    }
-}
 
 
 /// Virtual memory layout of a process
@@ -77,22 +63,15 @@ pub(crate) struct Block {
     pub region: NonNull<Node<Region>>,
 }
 
+/// Allocator structure.
 pub struct MmapAllocator {
-    /// Linked list of allocator memory [`Region`]
-    regions: List<Region>,
-    /// Computer's page size (used for aligment). See [`MmapAllocator::align`]
-    page_size: usize,
-    /// Linked list of free blocks identified by [`Block::is_free`]
-    free_list: FreeList,
+    allocator: Kernel,
 }
 
 impl MmapAllocator {
+    /// Construct a new allocator by constructing its `Kernel`
     pub unsafe fn new() -> Self {
-        // TODO: definitely need to refactor this.
-        page_size();
-        unsafe {
-            Self {regions: List::new(), page_size: PAGE_SIZE, free_list: FreeList::new()}
-        }
+        Self { allocator: Kernel::new() }
     }
 
     /// It aligns `to_be_aligned` using `aligment`.
@@ -112,7 +91,7 @@ impl MmapAllocator {
     /// This implementation of the method uses the first-fit algorithm, it returns
     /// the first block on the [`FreeList`] that we can use.
     fn find_free_block(&self, layout: Layout) -> Link<Node<Block>> {
-        if self.free_list.is_empty() {
+        if self.allocator.free_list.is_empty() {
             // We have no regions created yet.
             return None;
         }
@@ -127,7 +106,7 @@ impl MmapAllocator {
         
 
         // We check in our free_list if there exists any node that can fit `needed_size`
-        for node in &self.free_list.items {
+        for node in &self.allocator.free_list.items {
             unsafe {
                 if node.as_ref().data.size >= needed_size {
                     // We found a node that we can use
@@ -164,7 +143,7 @@ impl MmapAllocator {
 
         let needed = needed_payload + block_overhead;
 
-        let region_size = self.align(needed, self.page_size);
+        let region_size = self.align(needed, self.allocator.page_size);
 
         const ADDR: *mut c_void = ptr::null_mut::<c_void>();
         const PROT: c_int = libc::PROT_READ | libc::PROT_WRITE;
@@ -179,7 +158,7 @@ impl MmapAllocator {
                 return Err("mmap syscall failed");
             }
 
-            let mut region = self.regions.append(
+            let mut region = self.allocator.regions.append(
                 Region {
                     size: region_size - REGION_HEADER_SIZE,
                     blocks: List::new(),
@@ -208,7 +187,7 @@ impl MmapAllocator {
                 block.as_ptr().cast::<u8>().add(mem::size_of::<Node<Block>>())
             );
 
-            self.free_list.insert_free_block(block, free_node_addr);
+            self.allocator.free_list.insert_free_block(block, free_node_addr);
         }
         
         Ok(())
@@ -251,7 +230,7 @@ impl MmapAllocator {
             let remaining = block.as_ref().data.size.saturating_sub(requested);
 
             // We take the block out of the Free List
-            self.free_list.remove_free_block(block);
+            self.allocator.free_list.remove_free_block(block);
 
             // We are going to use this block, so we marked as used
             block.as_mut().data.is_free = false;
@@ -281,7 +260,7 @@ impl MmapAllocator {
                     NonNull::new_unchecked((new_block.as_ptr() as *mut u8)
                     .add(header_size));
 
-                self.free_list.insert_free_block(new_block, free_block_addr);
+                self.allocator.free_list.insert_free_block(new_block, free_block_addr);
             } else {
                 // Splitting is not worth it
                 block.as_mut().data.is_free = false;
@@ -375,7 +354,7 @@ impl MmapAllocator {
 
                 if next_block.is_free {
                     if next_block.size >= MIN_BLOCK_SIZE {
-                        self.free_list.remove_free_block(next_node);
+                        self.allocator.free_list.remove_free_block(next_node);
                     }
 
                     block_node.as_mut().data.size += header_size + next_block.size;
@@ -393,8 +372,8 @@ impl MmapAllocator {
 
                 // Just in case the block stills in the free list, we always remove it just in case.
                 // If it was not in the free list, `remove_free_block` will manage it
-                self.free_list.remove_free_block(block_node);
-                self.regions.remove(region);
+                self.allocator.free_list.remove_free_block(block_node);
+                self.allocator.regions.remove(region);
 
                 let region_start = region.as_ptr() as *mut u8;
 
@@ -404,13 +383,13 @@ impl MmapAllocator {
 
                 // We remove the block from the list, and we reinsert it with the correct size.
                 // TODO: Performance?
-                self.free_list.remove_free_block(block_node);
+                self.allocator.free_list.remove_free_block(block_node);
                 // We use the free block payload
                 let free_block_addr = 
                     NonNull::new_unchecked((block_node.as_ptr() as *mut u8)
                     .add(header_size));
 
-                self.free_list.insert_free_block(block_node, free_block_addr);
+                self.allocator.free_list.insert_free_block(block_node, free_block_addr);
             }
         }
     }
@@ -443,7 +422,7 @@ mod tests {
 
             for (sizes, expected) in aligments {
                 for size in sizes {
-                    assert_eq!(expected, allocator.align(size, allocator.page_size))
+                    assert_eq!(expected, allocator.align(size, allocator.allocator.page_size))
                 }
             }
         }
@@ -551,12 +530,12 @@ mod tests {
             let p1 = allocator.alloc(layout);
             let p2 = allocator.alloc(layout);
 
-            assert!(!allocator.regions.is_empty());
+            assert!(!allocator.allocator.regions.is_empty());
 
             allocator.dealloc(p1);
             allocator.dealloc(p2);
 
-            assert!(allocator.regions.is_empty());
+            assert!(allocator.allocator.regions.is_empty());
         }
     }
 }
