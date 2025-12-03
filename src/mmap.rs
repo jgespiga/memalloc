@@ -1,8 +1,6 @@
-use std::{alloc::Layout, mem, os::raw::{c_int, c_void}, ptr::{self, NonNull}};
+use std::{alloc::Layout, mem, ptr::{self, NonNull}};
 
-use libc::{mmap, munmap, off_t, size_t};
-
-use crate::{freelist::FreeList, kernel::Kernel, list::{Link, List, Node}, region::{REGION_HEADER_SIZE, Region}};
+use crate::{kernel::{self, Kernel}, list::{Link, List, Node}, region::{REGION_HEADER_SIZE, Region}};
 
 
 /// This is the minimun block size we want to have. If we are
@@ -145,18 +143,10 @@ impl MmapAllocator {
 
         let region_size = self.align(needed, self.allocator.page_size);
 
-        const ADDR: *mut c_void = ptr::null_mut::<c_void>();
-        const PROT: c_int = libc::PROT_READ | libc::PROT_WRITE;
-        const FLAGS: c_int = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS;
-        const FD: c_int = -1;
-        const OFFSET: off_t = 0;
-
         unsafe {    
-            let addr = mmap(ADDR, region_size as size_t, PROT, FLAGS, FD, OFFSET);
-            
-            if addr == libc::MAP_FAILED {
-                return Err("mmap syscall failed");
-            }
+            // What should we do here? I assume its okay to panic if 
+            // we get None from calling `mmap`.
+            let addr = kernel::request_memory(region_size).expect("mmap syscall returned None");
 
             let mut region = self.allocator.regions.append(
                 Region {
@@ -164,7 +154,7 @@ impl MmapAllocator {
                     blocks: List::new(),
                 },
 
-                NonNull::new_unchecked(addr).cast(),
+                addr
             );
 
             // First Node<Block> right after Node<Region>
@@ -374,10 +364,10 @@ impl MmapAllocator {
                 // If it was not in the free list, `remove_free_block` will manage it
                 self.allocator.free_list.remove_free_block(block_node);
                 self.allocator.regions.remove(region);
-
+                
                 let region_start = region.as_ptr() as *mut u8;
 
-                munmap(region_start as *mut c_void, total_region_size as size_t);
+                kernel::return_memory(region_start, total_region_size);
             } else {
                 // The current region still has other blocks so the merged block has to return to the free list.
 

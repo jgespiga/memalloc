@@ -10,12 +10,23 @@ pub(crate) static mut PAGE_SIZE: usize = 0;
 pub(crate) fn page_size() -> usize {
     unsafe {
         if PAGE_SIZE == 0 {
-            PAGE_SIZE = libc::sysconf(libc::_SC_PAGE_SIZE) as usize;
+            PAGE_SIZE = Kernel::page_size();
         }
 
         PAGE_SIZE
     }
 }
+
+
+trait PlatformMemory {
+    unsafe fn request_memory(len: usize) -> Option<NonNull<u8>>;
+
+    unsafe fn return_memory(addr: *mut u8, len: usize);
+
+    unsafe fn page_size() -> usize;
+}
+
+
 /// The internal data structure of the allocator. Here is where
 /// we manage the low level memory request as well as platform-dependant
 /// stuff.
@@ -42,18 +53,20 @@ impl Kernel {
 }
 
 
-trait PlatformMemory {
-    unsafe fn request_memory(len: usize) -> Option<NonNull<u8>>;
 
-    unsafe fn return_memory(address: NonNull<u8>, len: usize);
-}
-
+/// Wrapper to use [`Kernel::request_memory`] 
 #[inline]
 pub(crate) unsafe fn request_memory(len: usize) -> Option<NonNull<u8>> {
     unsafe { Kernel::request_memory(len) }
 } 
 
-#[cfg(target_os = "linux")]
+/// Wrapper to use [`Kernel::return_memory`]
+#[inline]
+pub(crate) unsafe fn return_memory(addr: *mut u8, len: usize) {
+    unsafe { Kernel::return_memory(addr, len); }
+}
+
+#[cfg(unix)]
 mod unix {
     use super::{PlatformMemory, Kernel};
 
@@ -79,12 +92,49 @@ mod unix {
             }
         }
 
-        unsafe fn return_memory(address: std::ptr::NonNull<u8>, len: usize) {
-        
+        unsafe fn return_memory(addr: *mut u8, len: usize) {
+            unsafe { munmap(addr as *mut c_void, len as size_t); }
+        }
+
+        unsafe fn page_size() -> usize {
+            unsafe { libc::sysconf(libc::_SC_PAGE_SIZE) as usize }
         }
     }
 }
 
+#[cfg(windows)]
 mod windows {
-     
+    use std::{mem::MaybeUninit, ptr::NonNull, os::raw::c_void};
+
+    use crate::kernel::{Kernel, PlatformMemory};
+
+    use windows::Win32::System::{Memory, SystemInformation};
+
+    impl PlatformMemory for Kernel {
+        unsafe fn request_memory(len: usize) -> Option<std::ptr::NonNull<u8>> {
+            // Read-Write only.
+            let protection = Memory::PAGE_READWRITE;
+
+            let flags = Memory::MEM_RESERVE | Memory::MEM_COMMIT;
+
+            unsafe {
+                let addr = Memory::VirtualAlloc(None, len, flags, protection);
+                
+                NonNull::new(addr.cast())
+            }
+        }
+
+        unsafe fn return_memory(addr: *mut u8, _len: usize) {
+            unsafe { Memory::VirtualFree(addr as *mut c_void, 0, Memory::MEM_RELEASE); }
+        }
+
+        unsafe fn page_size() -> usize {
+            unsafe {
+                let mut system_info = MaybeUninit::uninit();
+                SystemInformation::GetSystemInfo(system_info.as_mut_ptr());
+                
+                system_info.assume_init().dwPageSize as usize
+            }
+        }
+    }
 }
