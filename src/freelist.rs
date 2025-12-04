@@ -1,6 +1,6 @@
-use std::ptr::NonNull;
+use std::{alloc::Layout, mem, ptr::NonNull};
 
-use crate::{list::{List, Node}, mmap::Block};
+use crate::{block::Block, list::{Link, List, Node}, mmap::MIN_BLOCK_SIZE, utils::align};
 
 /// Linked list to keep track of free [`Block`]. 
 /// 
@@ -111,5 +111,40 @@ impl FreeList {
                 current = free_node.as_ref().next;
             }
         }
-    } 
+    }
+
+    /// Returns a pointer to the [`Block`] where we can allocate `layout`.
+    /// This is done by iterating through the [`FreeList`] and searching for
+    /// a block that can allocate enough `size`.
+    /// 
+    /// This implementation of the method uses the first-fit algorithm, it returns
+    /// the first block on the [`FreeList`] that we can use.
+    pub fn find_free_block(&self, layout: Layout) -> Link<Node<Block>> {
+        if self.is_empty() {
+            // We have no regions created yet.
+            return None;
+        }
+
+        // This is the size we need, including aligment
+        let layout_size = align(layout.size(), mem::size_of::<usize>());
+
+        // The minimun block size we can give to the user is `MIN_BLOCK_SIZE`. If we
+        // didn't do this, we wouldn't be able to store our allocator's metadata on
+        // small memory requests.
+        let needed_size = std::cmp::max(layout_size, MIN_BLOCK_SIZE);
+        
+
+        // We check in our free_list if there exists any node that can fit `needed_size`
+        for node in &self.items {
+            unsafe {
+                if node.as_ref().data.size >= needed_size {
+                    // We found a node that we can use
+                    return Some(*node);
+                }
+            }
+        }
+
+        // There is no free block we can use
+        None
+    }
 }

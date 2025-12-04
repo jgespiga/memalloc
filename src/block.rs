@@ -32,3 +32,8 @@ pub(crate) struct Block {
     /// Region which the block belongs to
     pub region: NonNull<Node<Region>>,
 }
+
+impl Block {
+
+
+}

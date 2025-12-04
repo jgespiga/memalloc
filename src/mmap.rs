@@ -1,6 +1,12 @@
 use std::{alloc::Layout, mem, ptr::{self, NonNull}};
 
-use crate::{block::{BLOCK_HEADER_SIZE, Block}, kernel::{self, Kernel}, list::{Link, List, Node}, region::{REGION_HEADER_SIZE, Region}, utils::align};
+use crate::{
+    block::{BLOCK_HEADER_SIZE, Block}, 
+    kernel::{self, Kernel}, 
+    list::{Link, List, Node}, 
+    region::{REGION_HEADER_SIZE, Region}, 
+    utils::align,
+};
 
 
 /// This is the minimun block size we want to have. If we are
@@ -52,106 +58,6 @@ impl MmapAllocator {
     }
 
 
-    /// Returns a pointer to the [`Block`] where we can allocate `layout`.
-    /// This is done by iterating through the [`FreeList`] and searching for
-    /// a block that can allocate enough `size`.
-    /// 
-    /// This implementation of the method uses the first-fit algorithm, it returns
-    /// the first block on the [`FreeList`] that we can use.
-    fn find_free_block(&self, layout: Layout) -> Link<Node<Block>> {
-        if self.allocator.free_list.is_empty() {
-            // We have no regions created yet.
-            return None;
-        }
-
-        // This is the size we need, including aligment
-        let layout_size = align(layout.size(), mem::size_of::<usize>());
-
-        // The minimun block size we can give to the user is `MIN_BLOCK_SIZE`. If we
-        // didn't do this, we wouldn't be able to store our allocator's metadata on
-        // small memory requests.
-        let needed_size = std::cmp::max(layout_size, MIN_BLOCK_SIZE);
-        
-
-        // We check in our free_list if there exists any node that can fit `needed_size`
-        for node in &self.allocator.free_list.items {
-            unsafe {
-                if node.as_ref().data.size >= needed_size {
-                    // We found a node that we can use
-                    return Some(*node);
-                }
-            }
-        }
-
-        // There is no free block we can use
-        None
-    }
-
-    /// This function calls to mmap, and returns a new memory region that can
-    /// handle a given size.
-    /// 
-    /// If [`MmapAllocator::find_free_block`] returns null pointer, we know for
-    /// sure there is no way we can allocate the requested size on our current
-    /// Regions. Therefor, we need to allocate a new [`Region`] using
-    /// [`libc::mmap`].
-    /// 
-    /// This implementation is platform-dependant. It only works on linux right now.
-    fn allocate_new_region(&mut self, layout: Layout) -> Result<(), &'static str> {
-        let block_overhead = mem::size_of::<Node<Block>>();
-
-        // What we really need to allocate is the requested size (aligned)
-        // plus the overhead introduced by out allocator's data structures
-        let layout_size = align(layout.size(), mem::size_of::<usize>());
-
-        // The minimun block size we can give to the user is `MIN_BLOCK_SIZE`. If we
-        // didn't do this, we wouldn't be able to store our allocator's metadata on
-        // small memory requests.
-        let needed_payload = std::cmp::max(layout_size, MIN_BLOCK_SIZE);
-
-        let needed = needed_payload + block_overhead;
-
-        let region_size = align(needed, self.allocator.page_size);
-
-        unsafe {    
-            // What should we do here? I assume its okay to panic if 
-            // we get None from calling `mmap`.
-            let addr = kernel::request_memory(region_size).expect("mmap syscall returned None");
-
-            let mut region = self.allocator.regions.append(
-                Region {
-                    size: region_size - REGION_HEADER_SIZE,
-                    blocks: List::new(),
-                },
-
-                addr
-            );
-
-            // First Node<Block> right after Node<Region>
-            let block_addr = NonNull::new_unchecked(region.as_ptr().offset(1)).cast();
-
-            // Useful block size
-            let block_size = region.as_ref().data.size - mem::size_of::<Node<Block>>();
-
-            let block = region.as_mut().data.blocks.append(
-                Block {
-                    size: block_size,
-                    is_free: true,
-                    region,
-                },
-                block_addr,
-            );
-
-            // We use the payload of the free block to store the node
-            let free_node_addr = NonNull::new_unchecked(
-                block.as_ptr().cast::<u8>().add(mem::size_of::<Node<Block>>())
-            );
-
-            self.allocator.free_list.insert_free_block(block, free_node_addr);
-        }
-        
-        Ok(())
-    }
-
     /// Splits the given `block` if possible
     /// 
     /// ```text
@@ -175,24 +81,24 @@ impl MmapAllocator {
     /// 
     /// The payload of the free block is used to store the data we need. See [`FreeList`] for greater detail.
     unsafe fn take_from_block(&mut self, mut block: NonNull<Node<Block>>, requested_size: usize) -> *mut u8 {
-
+        
         unsafe {
-
+            
             // Payload size aligned
             let layout_size = align(requested_size, mem::size_of::<usize>());
-
+            
             // For small memory requests, the requested size is going to be MIN_BLOCK_SIZE anyway.
             let requested = std::cmp::max(layout_size, MIN_BLOCK_SIZE);
-
+            
             // Calculate what the remaining size would be if we used this block
             let remaining = block.as_ref().data.size.saturating_sub(requested);
 
             // We take the block out of the Free List
             self.allocator.free_list.remove_free_block(block);
-
+            
             // We are going to use this block, so we marked as used
             block.as_mut().data.is_free = false;
-
+            
             if remaining > BLOCK_HEADER_SIZE + MIN_BLOCK_SIZE {
                 // We have to split the block
                 let new_node_addr: NonNull<u8> = 
@@ -200,7 +106,7 @@ impl MmapAllocator {
                     .add(BLOCK_HEADER_SIZE + requested));
 
                 let new_block_size = remaining - BLOCK_HEADER_SIZE;
-
+                
                 let region = block.as_mut().data.region.as_mut();
 
                 let new_block = region.data.blocks.insert_after(
@@ -212,13 +118,13 @@ impl MmapAllocator {
                     },
                     new_node_addr.cast()
                 );
-
+                
                 // We use the free block payload
                 let free_block_addr = 
-                    NonNull::new_unchecked((new_block.as_ptr() as *mut u8)
-                    .add(BLOCK_HEADER_SIZE));
-
-                self.allocator.free_list.insert_free_block(new_block, free_block_addr);
+                NonNull::new_unchecked((new_block.as_ptr() as *mut u8)
+                .add(BLOCK_HEADER_SIZE));
+            
+            self.allocator.free_list.insert_free_block(new_block, free_block_addr);
             } else {
                 // Splitting is not worth it
                 block.as_mut().data.is_free = false;
@@ -230,15 +136,14 @@ impl MmapAllocator {
         }
     }
 
-
     #[inline]
     pub unsafe fn alloc(&mut self, layout: Layout) -> *mut u8 {
-        let mut block = self.find_free_block(layout);
+        let mut block = self.allocator.free_list.find_free_block(layout);
 
         if block.is_none() {
             // There is no block aviable, so we need to allocate a new region
-            self.allocate_new_region(layout).unwrap();
-            block = self.find_free_block(layout);
+            self.allocator.allocate_new_region(layout).unwrap();
+            block = self.allocator.free_list.find_free_block(layout);
             
             if block.is_none() {
                 // There has been an error, what should we do, panic?
