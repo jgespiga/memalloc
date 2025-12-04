@@ -11,14 +11,12 @@ pub(crate) const REGION_HEADER_SIZE: usize = mem::size_of::<Node<Region>>();
 /// as every other header, this is usually represented as a [`Node<Region>`]
 /// so that would be the complete region data.
 /// 
-/// [`libc::mmap`] gives as memory regions aligned with the computer
-/// page size. But, we cannot use a full Region each time
-/// user allocates memory since we will be wasting a lot of 
-/// space. Also, we cannot assume this regions are adjacent.
+/// [`libc::mmap`] gives as memory regions aligned with the computer page size. 
+/// But, we cannot use a full Region each time user allocates memory since we 
+/// will be wasting a lot of  space. Also, we cannot assume this regions are adjacent.
 /// 
-/// Therefor, we are going to use the following data structure
-/// which consists in a LinkedList of [`Region`] which inside of them
-/// have a LinkedList of [`Block`].
+/// Therefor, we are going to use the following data structure which consists in 
+/// a LinkedList of [`Region`] which inside of them have a LinkedList of [`Block`].
 /// 
 /// ```text
 /// +-----------------------------------------------+      +-----------------------------------------------+
@@ -85,4 +83,5 @@ impl Region {
             }
         }
     }
+
 }

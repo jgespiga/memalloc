@@ -313,41 +313,51 @@ impl MmapAllocator {
 
             let mut region = block.region;
 
-            // Try no merge the block with the previous one.
+            // Try to merge the block with the previous one.
             region.as_mut().data.merge_with_prev(&mut block_node);
 
             // Try to merge the block with the next one.
             region.as_mut().data.merge_with_next(&mut block_node, &mut self.allocator.free_list);
 
-
-            // Now we have to check if the region has only one free block.
-            // In that case, we need to delete the region from the Linked List and call `munmap` on it.
-            if block_node.as_ref().prev.is_none() && block_node.as_ref().next.is_none() {
+            // Check if we need to remove and munmap the current `region`
+            self.check_region_removal(&mut region, block_node);
+        }
+    }
+    
+    /// Checks if the given `region` needs to be returned to the OS or not while managing
+    /// the free_list and the state of `block` which might be the only block left in the region.
+    /// We need this `block` since, if we were to munmap this region, we also need to remove that block
+    /// from out free_list to avoid future problems. If we didn't do that, our allocator could think that
+    /// this `block` stills free and therefor it will try to use it, causing undefined behavior.
+    fn check_region_removal(&mut self, region: &mut NonNull<Node<Region>>, block: NonNull<Node<Block>>) {
+        unsafe {
+            let header_size = mem::size_of::<Node<Block>>();
+            if region.as_mut().data.blocks.len() == 1 {
                 let total_region_size = region.as_ref().data.size + REGION_HEADER_SIZE;
-
-                // Just in case the block stills in the free list, we always remove it just in case.
+                
+                // Just in case the block stills in the free list, we always remove it.
                 // If it was not in the free list, `remove_free_block` will manage it
-                self.allocator.free_list.remove_free_block(block_node);
-                self.allocator.regions.remove(region);
+                self.allocator.free_list.remove_free_block(block);
+                self.allocator.regions.remove(*region);
                 
                 let region_start = region.as_ptr() as *mut u8;
 
                 kernel::return_memory(region_start, total_region_size);
             } else {
                 // The current region still has other blocks so the merged block has to return to the free list.
-
+                
                 // We remove the block from the list, and we reinsert it with the correct size.
-                // TODO: Performance?
-                self.allocator.free_list.remove_free_block(block_node);
+                self.allocator.free_list.remove_free_block(block);
                 // We use the free block payload
                 let free_block_addr = 
-                    NonNull::new_unchecked((block_node.as_ptr() as *mut u8)
-                    .add(header_size));
-
-                self.allocator.free_list.insert_free_block(block_node, free_block_addr);
+                NonNull::new_unchecked((block.as_ptr() as *mut u8)
+                .add(header_size));
+            
+                self.allocator.free_list.insert_free_block(block, free_block_addr);
             }
         }
     }
+      
 }
 
 #[cfg(test)]
@@ -486,7 +496,7 @@ mod tests {
             let p2 = allocator.alloc(layout);
 
             assert!(!allocator.allocator.regions.is_empty());
-
+            
             allocator.dealloc(p1);
             allocator.dealloc(p2);
 
