@@ -1,6 +1,6 @@
 use std::{alloc::Layout, mem, ptr::{self, NonNull}};
 
-use crate::{kernel::{self, Kernel}, list::{Link, List, Node}, region::{REGION_HEADER_SIZE, Region}};
+use crate::{block::{BLOCK_HEADER_SIZE, Block}, kernel::{self, Kernel}, list::{Link, List, Node}, region::{REGION_HEADER_SIZE, Region}};
 
 
 /// This is the minimun block size we want to have. If we are
@@ -38,28 +38,7 @@ pub(crate) const MIN_BLOCK_SIZE: usize = mem::size_of::<Node<NonNull<Node<Block>
 
 
 
-/// This is the structure of a block. The fields of the block are it's metadata,
-/// content is placed after this header.
-/// ```text
-/// +----------------+        +
-/// |      size      |        |
-/// +----------------+        |
-/// |   is_free (1b) |        | -> Header
-/// +----------------+        |
-/// |     region     |        |
-/// +----------------+        +       
-/// |     Content    |
-/// |                |
-/// +----------------+
-/// ```
-pub(crate) struct Block {
-    /// Size of the block.
-    pub size: usize, 
-    /// Flag to tell whether the block is free or not.
-    pub is_free: bool,
-    /// Region which the block belongs to
-    pub region: NonNull<Node<Region>>,
-}
+
 
 /// Allocator structure.
 pub struct MmapAllocator {
@@ -205,7 +184,6 @@ impl MmapAllocator {
     /// 
     /// The payload of the free block is used to store the data we need. See [`FreeList`] for greater detail.
     unsafe fn take_from_block(&mut self, mut block: NonNull<Node<Block>>, requested_size: usize) -> *mut u8 {
-        let header_size = mem::size_of::<Node<Block>>();
 
         unsafe {
 
@@ -224,13 +202,13 @@ impl MmapAllocator {
             // We are going to use this block, so we marked as used
             block.as_mut().data.is_free = false;
 
-            if remaining > header_size + MIN_BLOCK_SIZE {
+            if remaining > BLOCK_HEADER_SIZE + MIN_BLOCK_SIZE {
                 // We have to split the block
                 let new_node_addr: NonNull<u8> = 
                     NonNull::new_unchecked((block.as_ptr() as *mut u8)
-                    .add(header_size + requested));
+                    .add(BLOCK_HEADER_SIZE + requested));
 
-                let new_block_size = remaining - header_size;
+                let new_block_size = remaining - BLOCK_HEADER_SIZE;
 
                 let region = block.as_mut().data.region.as_mut();
 
@@ -247,7 +225,7 @@ impl MmapAllocator {
                 // We use the free block payload
                 let free_block_addr = 
                     NonNull::new_unchecked((new_block.as_ptr() as *mut u8)
-                    .add(header_size));
+                    .add(BLOCK_HEADER_SIZE));
 
                 self.allocator.free_list.insert_free_block(new_block, free_block_addr);
             } else {
@@ -257,7 +235,7 @@ impl MmapAllocator {
 
             // We return a pointer to the payload.
             // This is the address where the user will place content
-            (block.as_ptr() as *mut u8).add(header_size)
+            (block.as_ptr() as *mut u8).add(BLOCK_HEADER_SIZE)
         }
     }
 
@@ -331,7 +309,6 @@ impl MmapAllocator {
     /// this `block` stills free and therefor it will try to use it, causing undefined behavior.
     fn check_region_removal(&mut self, region: &mut NonNull<Node<Region>>, block: NonNull<Node<Block>>) {
         unsafe {
-            let header_size = mem::size_of::<Node<Block>>();
             if region.as_mut().data.blocks.len() == 1 {
                 let total_region_size = region.as_ref().data.size + REGION_HEADER_SIZE;
                 
@@ -351,7 +328,7 @@ impl MmapAllocator {
                 // We use the free block payload
                 let free_block_addr = 
                 NonNull::new_unchecked((block.as_ptr() as *mut u8)
-                .add(header_size));
+                .add(BLOCK_HEADER_SIZE));
             
                 self.allocator.free_list.insert_free_block(block, free_block_addr);
             }

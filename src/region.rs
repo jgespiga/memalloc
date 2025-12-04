@@ -1,6 +1,6 @@
 use std::{mem, ptr::NonNull};
 
-use crate::{freelist::FreeList, list::{List, Node}, mmap::{Block, MIN_BLOCK_SIZE}};
+use crate::{block::{BLOCK_HEADER_SIZE, Block}, freelist::FreeList, list::{List, Node}, mmap::MIN_BLOCK_SIZE};
 
 
 /// This is the overhead size introduced by the [`Region`] header in bytes.
@@ -42,8 +42,6 @@ impl Region {
 
             // If the previous block is free, we can merge it with this one.
             if let Some(mut prev_node) = node.as_ref().prev {
-                // Todo: extract header_size
-                let header_size = mem::size_of::<Node<Block>>();
                 let prev_block = &mut prev_node.as_mut().data;
 
                 if prev_block.is_free {
@@ -51,7 +49,7 @@ impl Region {
                     // and remove its adjacent block with which we are going to merge this one from the list
                     
                     // We need to cover the header and the actual content of the block
-                    prev_block.size +=  header_size + block.size;
+                    prev_block.size += BLOCK_HEADER_SIZE + block.size;
                     
                     // We remove the block from the list since it is going to be merged
                     //region.as_mut().data.blocks.remove(node);
@@ -67,7 +65,6 @@ impl Region {
     /// list. This can be performed if that next block is free.
     pub(crate) fn merge_with_next(&mut self, node: &mut NonNull<Node<Block>>, free_list: &mut FreeList) {
         unsafe {
-            let header_size = mem::size_of::<Node<Block>>();
             if let Some(mut next_node) = node.as_ref().next {
                 let next_block = &mut next_node.as_mut().data;
 
@@ -76,7 +73,7 @@ impl Region {
                        free_list.remove_free_block(next_node);
                     }
 
-                    node.as_mut().data.size += header_size + next_block.size;
+                    node.as_mut().data.size += BLOCK_HEADER_SIZE + next_block.size;
                     // We remove the block from the list since it is going to be merged                   
                     self.blocks.remove(next_node);
                }

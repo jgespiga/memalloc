@@ -1,5 +1,6 @@
 pub mod mmap;
 mod list;
-mod region;
 mod freelist;
+mod block;
+mod region;
 mod kernel;
