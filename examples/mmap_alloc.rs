@@ -1,4 +1,4 @@
-use std::{alloc::Layout, ptr::NonNull};
+use std::{alloc::Layout};
 use memalloc::mmap::MmapAllocator;
 
 fn log_alloc(addr: *mut u8, layout: Layout) {

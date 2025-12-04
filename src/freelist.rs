@@ -1,6 +1,6 @@
 use std::ptr::NonNull;
 
-use crate::{list::{List, Node}, mmap::Block, region::Region};
+use crate::{list::{List, Node}, mmap::Block};
 
 /// Linked list to keep track of free [`Block`]. 
 /// 

@@ -8,7 +8,7 @@ use crate::{kernel::{self, Kernel}, list::{Link, List, Node}, region::{REGION_HE
 /// this value:
 /// - It does not make any sense to split it.
 /// - We wouldn't be able to store the [`FreeList`] block metadata
-const MIN_BLOCK_SIZE: usize = mem::size_of::<Node<NonNull<Node<Block>>>>(); 
+pub(crate) const MIN_BLOCK_SIZE: usize = mem::size_of::<Node<NonNull<Node<Block>>>>(); 
 
 
 
@@ -112,7 +112,6 @@ impl MmapAllocator {
                 }
             }
         }
-
 
         // There is no free block we can use
         None
@@ -314,44 +313,11 @@ impl MmapAllocator {
 
             let mut region = block.region;
 
-            // Block merging (TODO: extract this into other functions)
+            // Try no merge the block with the previous one.
+            region.as_mut().data.merge_with_prev(&mut block_node);
 
-            // If the previous block is free, we can merge it with this one.
-            if let Some(mut prev_node) = block_node.as_ref().prev {
-
-                let prev_block = &mut prev_node.as_mut().data;
-
-                // We remove the prev node from the free list since we are going to merge it.
-                if prev_block.is_free {
-                    // As prev_block is already in the `free list` we just need to increment its size
-                    // and remove its adjacent block with which we are going to merge this one from the list
-                    
-                    // We need to cover the header and the actual content of the block
-                    prev_block.size += header_size + block.size;
-                    
-                    // We remove the block from the list since it is going to be merged
-                    region.as_mut().data.blocks.remove(block_node);
-
-                    // The current block is now its previous one
-                    block_node = prev_node;
-                }
-            }
-
-            // Now, `block_node` is the block merged with the previous one (if there was)
-            // Therefor, we can try to merge it with the next block
-            if let Some(mut next_node) = block_node.as_ref().next {
-                let next_block = &mut next_node.as_mut().data;
-
-                if next_block.is_free {
-                    if next_block.size >= MIN_BLOCK_SIZE {
-                        self.allocator.free_list.remove_free_block(next_node);
-                    }
-
-                    block_node.as_mut().data.size += header_size + next_block.size;
-                    // We remove the block from the list since it is going to be merged                   
-                    region.as_mut().data.blocks.remove(next_node);
-               }
-            }
+            // Try to merge the block with the next one.
+            region.as_mut().data.merge_with_next(&mut block_node, &mut self.allocator.free_list);
 
 
             // Now we have to check if the region has only one free block.

@@ -25,11 +25,6 @@ pub struct Iter<'a, T> {
     marker: PhantomData<&'a T>,
 }
 
-impl<T> Node<T> {
-    pub fn new(data: T) -> Self {
-        Self { next: None, prev: None, data}
-    }
-}
 
 impl<T> List<T> {
     pub fn new() -> Self {
@@ -191,15 +186,16 @@ impl<'a, T> IntoIterator for &'a List<T> {
 
 #[cfg(test)]
 mod tests {
+    //! The problem with testing this [`List`] is that, as detailed avobe, as we
+    //! are the allocator we cannot make allocations by ourselves. Because of that,
+    //! we need to simulate what our allocator will do in order to have a valid address
+    //! we can give to each node on our linked list.
+    //! 
+    //! Therefor, we will use [`std::alloc::alloc`] and [`std::alloc::dealloc`] to test our list.
+    
     use super::*;
     use std::alloc::{alloc, dealloc, Layout};
 
-    // The problem with testing this [`List`] is that, as detailed avobe, as we
-    // are the allocator we cannot make allocations by ourselves. Because of that,
-    // we need to simulate what our allocator will do in order to have a valid address
-    // we can give to each node on our linked list.
-    // 
-    // Therefor, we will use `std::alloc` and `std::dealloc` to test our list.
 
     /// Helper function to get a new memory address for a new node
     unsafe fn get_memory_for_node<T>() -> NonNull<u8> {
