@@ -1,6 +1,6 @@
 use std::{alloc::Layout, mem, ptr::{self, NonNull}};
 
-use crate::{block::{BLOCK_HEADER_SIZE, Block}, kernel::{self, Kernel}, list::{Link, List, Node}, region::{REGION_HEADER_SIZE, Region}};
+use crate::{block::{BLOCK_HEADER_SIZE, Block}, kernel::{self, Kernel}, list::{Link, List, Node}, region::{REGION_HEADER_SIZE, Region}, utils::align};
 
 
 /// This is the minimun block size we want to have. If we are
@@ -51,15 +51,6 @@ impl MmapAllocator {
         Self { allocator: Kernel::new() }
     }
 
-    /// It aligns `to_be_aligned` using `aligment`.
-    /// 
-    /// This method is used to align region sizes to be a multiple of [`MmapAllocator::page_size`]
-    /// and pointers in blocks to be a multiple of the computer's pointer size because memory
-    /// direcctions have to be aligned.
-    fn align(&self, to_be_aligned: usize, aligment: usize) -> usize {
-        (to_be_aligned + aligment - 1) & !(aligment - 1)
-    }
-
 
     /// Returns a pointer to the [`Block`] where we can allocate `layout`.
     /// This is done by iterating through the [`FreeList`] and searching for
@@ -74,7 +65,7 @@ impl MmapAllocator {
         }
 
         // This is the size we need, including aligment
-        let layout_size = self.align(layout.size(), mem::size_of::<usize>());
+        let layout_size = align(layout.size(), mem::size_of::<usize>());
 
         // The minimun block size we can give to the user is `MIN_BLOCK_SIZE`. If we
         // didn't do this, we wouldn't be able to store our allocator's metadata on
@@ -110,7 +101,7 @@ impl MmapAllocator {
 
         // What we really need to allocate is the requested size (aligned)
         // plus the overhead introduced by out allocator's data structures
-        let layout_size = self.align(layout.size(), mem::size_of::<usize>());
+        let layout_size = align(layout.size(), mem::size_of::<usize>());
 
         // The minimun block size we can give to the user is `MIN_BLOCK_SIZE`. If we
         // didn't do this, we wouldn't be able to store our allocator's metadata on
@@ -119,7 +110,7 @@ impl MmapAllocator {
 
         let needed = needed_payload + block_overhead;
 
-        let region_size = self.align(needed, self.allocator.page_size);
+        let region_size = align(needed, self.allocator.page_size);
 
         unsafe {    
             // What should we do here? I assume its okay to panic if 
@@ -188,7 +179,7 @@ impl MmapAllocator {
         unsafe {
 
             // Payload size aligned
-            let layout_size = self.align(requested_size, mem::size_of::<usize>());
+            let layout_size = align(requested_size, mem::size_of::<usize>());
 
             // For small memory requests, the requested size is going to be MIN_BLOCK_SIZE anyway.
             let requested = std::cmp::max(layout_size, MIN_BLOCK_SIZE);
@@ -341,35 +332,7 @@ impl MmapAllocator {
 mod tests {
     use super::*;
 
-    #[test]
-    fn align_pointer_size() {
-        let aligments = vec![(1..8, 8), (9..16, 16), (17..24, 24), (25..32, 32)];
-        unsafe { 
-            let allocator = MmapAllocator::new();
-
-            for (sizes, expected) in aligments {
-                for size in sizes {
-                    assert_eq!(expected, allocator.align(size, mem::size_of::<usize>()));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn align_page_size() {
-        let aligments = vec![(1..4096, 4096), (4097..8192, 8192)];
-
-        unsafe {
-            let allocator = MmapAllocator::new();
-
-            for (sizes, expected) in aligments {
-                for size in sizes {
-                    assert_eq!(expected, allocator.align(size, allocator.allocator.page_size))
-                }
-            }
-        }
-
-    }
+    
 
     #[test]
     fn basic_allocation_and_write() {

@@ -4,3 +4,4 @@ mod freelist;
 mod block;
 mod region;
 mod kernel;
+mod utils;
