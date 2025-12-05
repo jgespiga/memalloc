@@ -22,9 +22,9 @@ fn main() {
         log_alloc(addr3, layout3);
 
         println!("Deallocating everything...");
-        allocator.deallocate(addr1);
-        allocator.deallocate(addr2);
-        allocator.deallocate(addr3);
+        allocator.deallocate(addr1, layout1);
+        allocator.deallocate(addr2, layout2);
+        allocator.deallocate(addr3, layout3);
     }
 }
 
