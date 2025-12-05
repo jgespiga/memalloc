@@ -1,5 +1,5 @@
 use std::{alloc::Layout, ptr::NonNull};
-use crate::{block::{BLOCK_HEADER_SIZE, Block}, freelist::FreeList, list::List, mmap::MIN_BLOCK_SIZE, region::{REGION_HEADER_SIZE, Region}, utils::align};
+use crate::{block::{BLOCK_HEADER_SIZE, Block}, freelist::FreeList, list::{List, Node}, mmap::MIN_BLOCK_SIZE, region::{REGION_HEADER_SIZE, Region}, utils::align};
 
 /// Virtual memory page siz of the computer. This is usually 4096.
 /// This value should be a constant, but we can't do that since we 
@@ -33,24 +33,6 @@ trait PlatformMemory {
     unsafe fn page_size() -> usize;
 }
 
-
-impl Kernel {
-    /// Create a new instance of the allocator's `Kernel`. 
-    /// 
-    /// When created, it will calculate the computer's page size and 
-    /// initialize both the free list and the regions list to be 
-    /// new empty [`FreeList`] and [`List`] datastructures.
-    pub(crate) fn new() -> Self {
-        page_size();
-        unsafe {
-            Self {
-                regions: List::new(),
-                page_size: PAGE_SIZE, 
-                free_list: FreeList::new()
-            }
-        }
-    }
-}
 
 /// Wrapper to calculate the computer's page size.
 #[inline]
@@ -152,6 +134,23 @@ mod windows {
 }
 
 impl Kernel {
+    /// Create a new instance of the allocator's `Kernel`. 
+    /// 
+    /// When created, it will calculate the computer's page size and 
+    /// initialize both the free list and the regions list to be 
+    /// new empty [`FreeList`] and [`List`] datastructures.
+    pub(crate) fn new() -> Self {
+        page_size();
+        unsafe {
+            Self {
+                regions: List::new(),
+                page_size: PAGE_SIZE, 
+                free_list: FreeList::new()
+            }
+        }
+    }
+
+    
     /// This function returns a new memory `region` by using [`request_memory`].
     /// 
     /// If we don't have any free block we can use on our free list, we know for
@@ -160,7 +159,7 @@ impl Kernel {
     /// [`libc::mmap`].
     /// 
     /// This implementation is platform-dependant. It only works on linux right now.
-    pub fn allocate_new_region(&mut self, layout: Layout) -> Result<(), &'static str> {
+    pub(crate) fn allocate_new_region(&mut self, layout: Layout) -> Result<(), &'static str> {
 
         // What we really need to allocate is the requested size (aligned)
         // plus the overhead introduced by out allocator's data structures
@@ -215,5 +214,114 @@ impl Kernel {
         Ok(())
     }
 
+    /// Checks if the given `region` needs to be returned to the OS or not while managing
+    /// the free_list and the state of `block` which might be the only block left in the region.
+    /// We need this `block` since, if we were to munmap this region, we also need to remove that block
+    /// from out free_list to avoid future problems. If we didn't do that, our allocator could think that
+    /// this `block` stills free and therefor it will try to use it, causing undefined behavior.
+    pub(crate) fn check_region_removal(&mut self, region: &mut NonNull<Node<Region>>, block: NonNull<Node<Block>>) {
+        unsafe {
+            if region.as_mut().data.blocks.len() == 1 {
+                let total_region_size = region.as_ref().data.size + REGION_HEADER_SIZE;
+                
+                // Just in case the block stills in the free list, we always remove it.
+                // If it was not in the free list, `remove_free_block` will manage it
+                self.free_list.remove_free_block(block);
+                self.regions.remove(*region);
+                
+                let region_start = region.as_ptr() as *mut u8;
 
+                return_memory(region_start, total_region_size);
+            } else {
+                // The current region still has other blocks so the merged block has to return to the free list.
+                
+                // We remove the block from the list, and we reinsert it with the correct size.
+                self.free_list.remove_free_block(block);
+                // We use the free block payload
+                let free_block_addr = 
+                NonNull::new_unchecked((block.as_ptr() as *mut u8)
+                .add(BLOCK_HEADER_SIZE));
+            
+                self.free_list.insert_free_block(block, free_block_addr);
+            }
+        }
+    }
+
+    /// Splits the given `block` if possible
+    /// 
+    /// ```text
+    /// 
+    ///  +----------------> Given addr                                          
+    ///  |                                                                                   +-----> Returned addr
+    ///  |          +-----> Start of the block                                               |
+    ///  |          |                                                                        |
+    ///  +-------------------------------------------------+                      +----------+---------+---------+------------------+ 
+    ///  |          |                                      |      We split it     |          |         |         |                  |
+    ///  |  Header  |            Free Block                | -------------------> |  Header  |  Block  |  Header |    Free Block    |        
+    ///  |          |                                      |                      |          |         |         |                  |
+    ///  +-------------------------------------------------+                      +----------+---------+---------+------------------+
+    ///                                                                                                |
+    ///                                                                                                |
+    ///                                                                                                +-----> New block created 
+    /// ```
+    /// 
+    /// The new block that has been created must be added both to the [`FreeList`], since it is not used yet, and 
+    /// to the actual [`Region::blocks`], since it is a new block of the current region
+    /// 
+    /// The payload of the free block is used to store the data we need. See [`FreeList`] for greater detail.
+    pub(crate) unsafe fn take_from_block(&mut self, mut block: NonNull<Node<Block>>, requested_size: usize) -> *mut u8 {
+        
+        unsafe {
+            
+            // Payload size aligned
+            let layout_size = align(requested_size, std::mem::size_of::<usize>());
+            
+            // For small memory requests, the requested size is going to be MIN_BLOCK_SIZE anyway.
+            let requested = std::cmp::max(layout_size, MIN_BLOCK_SIZE);
+            
+            // Calculate what the remaining size would be if we used this block
+            let remaining = block.as_ref().data.size.saturating_sub(requested);
+
+            // We take the block out of the Free List
+            self.free_list.remove_free_block(block);
+            
+            // We are going to use this block, so we marked as used
+            block.as_mut().data.is_free = false;
+            
+            if remaining > BLOCK_HEADER_SIZE + MIN_BLOCK_SIZE {
+                // We have to split the block
+                let new_node_addr: NonNull<u8> = 
+                    NonNull::new_unchecked((block.as_ptr() as *mut u8)
+                    .add(BLOCK_HEADER_SIZE + requested));
+
+                let new_block_size = remaining - BLOCK_HEADER_SIZE;
+                
+                let region = block.as_mut().data.region.as_mut();
+
+                let new_block = region.data.blocks.insert_after(
+                    block,
+                    Block {
+                        size: new_block_size,
+                        is_free: true,
+                        region: block.as_mut().data.region,
+                    },
+                    new_node_addr.cast()
+                );
+                
+                // We use the free block payload
+                let free_block_addr = 
+                NonNull::new_unchecked((new_block.as_ptr() as *mut u8)
+                .add(BLOCK_HEADER_SIZE));
+            
+                self.free_list.insert_free_block(new_block, free_block_addr);
+            } else {
+                // Splitting is not worth it
+                block.as_mut().data.is_free = false;
+            }
+
+            // We return a pointer to the payload.
+            // This is the address where the user will place content
+            (block.as_ptr() as *mut u8).add(BLOCK_HEADER_SIZE)
+        }
+    }
 }

@@ -46,7 +46,10 @@ pub(crate) const MIN_BLOCK_SIZE: usize = mem::size_of::<Node<NonNull<Node<Block>
 
 
 
-/// Allocator structure.
+/// The main allocator's Struct. 
+/// 
+/// This is a wrapper over [`Kernel`], see that for more detail of the internals
+/// of the allocator.
 pub struct MmapAllocator {
     allocator: Kernel,
 }
@@ -58,83 +61,7 @@ impl MmapAllocator {
     }
 
 
-    /// Splits the given `block` if possible
-    /// 
-    /// ```text
-    /// 
-    ///  +----------------> Given addr                                          
-    ///  |                                                                                   +-----> Returned addr
-    ///  |          +-----> Start of the block                                               |
-    ///  |          |                                                                        |
-    ///  +-------------------------------------------------+                      +----------+---------+---------+------------------+ 
-    ///  |          |                                      |      We split it     |          |         |         |                  |
-    ///  |  Header  |            Free Block                | -------------------> |  Header  |  Block  |  Header |    Free Block    |        
-    ///  |          |                                      |                      |          |         |         |                  |
-    ///  +-------------------------------------------------+                      +----------+---------+---------+------------------+
-    ///                                                                                                |
-    ///                                                                                                |
-    ///                                                                                                +-----> New block created 
-    /// ```
-    /// 
-    /// The new block that has been created must be added both to the [`FreeList`], since it is not used yet, and 
-    /// to the actual [`Region::blocks`], since it is a new block of the current region
-    /// 
-    /// The payload of the free block is used to store the data we need. See [`FreeList`] for greater detail.
-    unsafe fn take_from_block(&mut self, mut block: NonNull<Node<Block>>, requested_size: usize) -> *mut u8 {
-        
-        unsafe {
-            
-            // Payload size aligned
-            let layout_size = align(requested_size, mem::size_of::<usize>());
-            
-            // For small memory requests, the requested size is going to be MIN_BLOCK_SIZE anyway.
-            let requested = std::cmp::max(layout_size, MIN_BLOCK_SIZE);
-            
-            // Calculate what the remaining size would be if we used this block
-            let remaining = block.as_ref().data.size.saturating_sub(requested);
-
-            // We take the block out of the Free List
-            self.allocator.free_list.remove_free_block(block);
-            
-            // We are going to use this block, so we marked as used
-            block.as_mut().data.is_free = false;
-            
-            if remaining > BLOCK_HEADER_SIZE + MIN_BLOCK_SIZE {
-                // We have to split the block
-                let new_node_addr: NonNull<u8> = 
-                    NonNull::new_unchecked((block.as_ptr() as *mut u8)
-                    .add(BLOCK_HEADER_SIZE + requested));
-
-                let new_block_size = remaining - BLOCK_HEADER_SIZE;
-                
-                let region = block.as_mut().data.region.as_mut();
-
-                let new_block = region.data.blocks.insert_after(
-                    block,
-                    Block {
-                        size: new_block_size,
-                        is_free: true,
-                        region: block.as_mut().data.region,
-                    },
-                    new_node_addr.cast()
-                );
-                
-                // We use the free block payload
-                let free_block_addr = 
-                NonNull::new_unchecked((new_block.as_ptr() as *mut u8)
-                .add(BLOCK_HEADER_SIZE));
-            
-            self.allocator.free_list.insert_free_block(new_block, free_block_addr);
-            } else {
-                // Splitting is not worth it
-                block.as_mut().data.is_free = false;
-            }
-
-            // We return a pointer to the payload.
-            // This is the address where the user will place content
-            (block.as_ptr() as *mut u8).add(BLOCK_HEADER_SIZE)
-        }
-    }
+    
 
     #[inline]
     pub unsafe fn alloc(&mut self, layout: Layout) -> *mut u8 {
@@ -153,7 +80,7 @@ impl MmapAllocator {
 
         // It doesn't have any sense to call this function unless `block` is not None
         if let Some(block) = block {
-            unsafe { self.take_from_block(block, layout.size()) } 
+            unsafe { self.allocator.take_from_block(block, layout.size()) } 
         } else {
             // Error?
             panic!("Todo");
@@ -194,42 +121,11 @@ impl MmapAllocator {
             region.as_mut().data.merge_with_next(&mut block_node, &mut self.allocator.free_list);
 
             // Check if we need to remove and munmap the current `region`
-            self.check_region_removal(&mut region, block_node);
+            self.allocator.check_region_removal(&mut region, block_node);
         }
     }
     
-    /// Checks if the given `region` needs to be returned to the OS or not while managing
-    /// the free_list and the state of `block` which might be the only block left in the region.
-    /// We need this `block` since, if we were to munmap this region, we also need to remove that block
-    /// from out free_list to avoid future problems. If we didn't do that, our allocator could think that
-    /// this `block` stills free and therefor it will try to use it, causing undefined behavior.
-    fn check_region_removal(&mut self, region: &mut NonNull<Node<Region>>, block: NonNull<Node<Block>>) {
-        unsafe {
-            if region.as_mut().data.blocks.len() == 1 {
-                let total_region_size = region.as_ref().data.size + REGION_HEADER_SIZE;
-                
-                // Just in case the block stills in the free list, we always remove it.
-                // If it was not in the free list, `remove_free_block` will manage it
-                self.allocator.free_list.remove_free_block(block);
-                self.allocator.regions.remove(*region);
-                
-                let region_start = region.as_ptr() as *mut u8;
-
-                kernel::return_memory(region_start, total_region_size);
-            } else {
-                // The current region still has other blocks so the merged block has to return to the free list.
-                
-                // We remove the block from the list, and we reinsert it with the correct size.
-                self.allocator.free_list.remove_free_block(block);
-                // We use the free block payload
-                let free_block_addr = 
-                NonNull::new_unchecked((block.as_ptr() as *mut u8)
-                .add(BLOCK_HEADER_SIZE));
-            
-                self.allocator.free_list.insert_free_block(block, free_block_addr);
-            }
-        }
-    }
+    
       
 }
 
