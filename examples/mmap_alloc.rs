@@ -10,21 +10,21 @@ fn main() {
         let mut allocator = MmapAllocator::new();
     
         let layout1 = Layout::new::<u8>();
-        let addr1 = allocator.alloc(layout1);
+        let addr1 = allocator.allocate(layout1);
         log_alloc(addr1, layout1);
 
         let layout2 = Layout::array::<u8>(1024).unwrap();
-        let addr2 = allocator.alloc(layout2);
+        let addr2 = allocator.allocate(layout2);
         log_alloc(addr2, layout2);
 
         let layout3 = Layout::array::<u8>(4096).unwrap();
-        let addr3 = allocator.alloc(layout3);
+        let addr3 = allocator.allocate(layout3);
         log_alloc(addr3, layout3);
 
         println!("Deallocating everything...");
-        allocator.dealloc(addr1);
-        allocator.dealloc(addr2);
-        allocator.dealloc(addr3);
+        allocator.deallocate(addr1);
+        allocator.deallocate(addr2);
+        allocator.deallocate(addr3);
     }
 }
 

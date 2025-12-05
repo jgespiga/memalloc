@@ -1,4 +1,4 @@
-use std::{alloc::Layout, mem, ptr::{self, NonNull}};
+use std::{alloc::{GlobalAlloc, Layout}, mem, ptr::{self, NonNull}, sync::Mutex};
 
 use crate::{
     block::{BLOCK_HEADER_SIZE, Block}, 
@@ -49,28 +49,33 @@ pub(crate) const MIN_BLOCK_SIZE: usize = mem::size_of::<Node<NonNull<Node<Block>
 /// The main allocator's Struct. 
 /// 
 /// This is a wrapper over [`Kernel`], see that for more detail of the internals
-/// of the allocator.
+/// of the allocator. The kernel is behind a `Mutex` in order to allow secure mutability.
 pub struct MmapAllocator {
-    allocator: Kernel,
+    allocator: Mutex<Kernel>,
 }
 
 impl MmapAllocator {
     /// Construct a new allocator by constructing its `Kernel`
     pub unsafe fn new() -> Self {
-        Self { allocator: Kernel::new() }
+        Self { allocator: Mutex::new(Kernel::new()) }
     }
 
 
-    
-
     #[inline]
-    pub unsafe fn alloc(&mut self, layout: Layout) -> *mut u8 {
-        let mut block = self.allocator.free_list.find_free_block(layout);
+    pub unsafe fn allocate(&self, layout: Layout) -> *mut u8 {
+
+        // We adquire the lock. If any other user panics while having the lock
+        // of this mutex, we should panic the program too, because that would mean
+        // that our allocator has had an unrecovable error. Therefor, we can unwrap 
+        // this Result.
+        let mut kernel = self.allocator.lock().unwrap();
+
+        let mut block = kernel.free_list.find_free_block(layout);
 
         if block.is_none() {
             // There is no block aviable, so we need to allocate a new region
-            self.allocator.allocate_new_region(layout).unwrap();
-            block = self.allocator.free_list.find_free_block(layout);
+            kernel.allocate_new_region(layout).unwrap();
+            block = kernel.free_list.find_free_block(layout);
             
             if block.is_none() {
                 // There has been an error, what should we do, panic?
@@ -80,7 +85,7 @@ impl MmapAllocator {
 
         // It doesn't have any sense to call this function unless `block` is not None
         if let Some(block) = block {
-            unsafe { self.allocator.take_from_block(block, layout.size()) } 
+            unsafe { kernel.take_from_block(block, layout.size()) } 
         } else {
             // Error?
             panic!("Todo");
@@ -89,15 +94,17 @@ impl MmapAllocator {
     
 
     #[inline]
-    pub unsafe fn dealloc(&mut self, ptr: *mut u8) {
+    pub unsafe fn deallocate(&self, ptr: *mut u8) {
         if ptr.is_null() {
             return;
         }
 
+        // We lock the mutex
+        let mut kernel = self.allocator.lock().unwrap();
+
         let header_size = mem::size_of::<Node<Block>>();
         
         unsafe {
-
             // We assume this part is a `header`, if is not, this will be UB
             let block_node_ptr = ptr.sub(header_size) as *mut Node<Block>;
             let mut block_node = NonNull::new_unchecked(block_node_ptr);
@@ -118,35 +125,40 @@ impl MmapAllocator {
             region.as_mut().data.merge_with_prev(&mut block_node);
 
             // Try to merge the block with the next one.
-            region.as_mut().data.merge_with_next(&mut block_node, &mut self.allocator.free_list);
+            region.as_mut().data.merge_with_next(&mut block_node, &mut kernel.free_list);
 
             // Check if we need to remove and munmap the current `region`
-            self.allocator.check_region_removal(&mut region, block_node);
+            kernel.check_region_removal(&mut region, block_node);
         }
     }
+}
+
+unsafe impl GlobalAlloc for MmapAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        unsafe { self.allocate(layout) }
+    }
     
-    
-      
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        todo!()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    
-
     #[test]
     fn basic_allocation_and_write() {
         unsafe {
-            let mut allocator = MmapAllocator::new();
+            let allocator = MmapAllocator::new();
             let layout = Layout::new::<u32>();
-
-            let block1 = allocator.alloc(layout) as *mut u32;
+            
+            let block1 = allocator.allocate(layout) as *mut u32;
 
             *block1 = 12415;
             assert_eq!(*block1, 12415);
 
-            let block2 = allocator.alloc(layout) as *mut u32;
+            let block2 = allocator.allocate(layout) as *mut u32;
 
             *block2 = 36353;
             assert_eq!(*block2, 36353);
@@ -159,17 +171,17 @@ mod tests {
     #[test]
     fn alloc_dealloc_reuse() {
         unsafe {
-            let mut allocator = MmapAllocator::new();
+            let allocator = MmapAllocator::new();
             let layout = Layout::new::<u64>();
 
             // Avoid munmaping the region during the test
-            allocator.alloc(Layout::new::<u64>());
+            allocator.allocate(Layout::new::<u64>());
 
             let block1 = allocator.alloc(layout);
             assert!(!block1.is_null());
 
             // We free the block
-            allocator.dealloc(block1);
+            allocator.deallocate(block1);
 
             let block2 = allocator.alloc(layout);
             assert!(!block2.is_null());
@@ -188,15 +200,15 @@ mod tests {
     fn dealloc_null() {
         unsafe {
             // This should not do anything, it should not panic.
-            let mut allocator = MmapAllocator::new();
-            allocator.dealloc(ptr::null_mut());
+            let allocator = MmapAllocator::new();
+            allocator.deallocate(ptr::null_mut());
         }
     }
 
     #[test]
     fn block_merging() {
         unsafe {
-            let mut allocator = MmapAllocator::new();
+            let allocator = MmapAllocator::new();
             let layout = Layout::new::<u8>();
 
             // Avoid munmaping the region during the test
@@ -204,10 +216,10 @@ mod tests {
 
             let p1 = allocator.alloc(layout);
             let p2 = allocator.alloc(layout);
-            allocator.dealloc(p2);
+            allocator.deallocate(p2);
 
             // After this, p1 and p2 should be merged (test: merging with next)            
-            allocator.dealloc(p1);
+            allocator.deallocate(p1);
             // This block should use the previosly merged block since p1 + p2 = 16
             let p3 = allocator.alloc(Layout::new::<u16>());
             assert_eq!(p1, p3);
@@ -215,10 +227,10 @@ mod tests {
             let layout2 = Layout::new::<u16>();
             let p4 = allocator.alloc(layout2);
 
-            allocator.dealloc(p3);
+            allocator.deallocate(p3);
 
             //After this, p3 and p4 should be merged (test: merging with prev)
-            allocator.dealloc(p4);            
+            allocator.deallocate(p4);            
 
             // This block should use the previosly merged block since p3 + p4 = 32
             let p5 = allocator.alloc(Layout::new::<u32>());
@@ -230,18 +242,27 @@ mod tests {
     #[test]
     fn munmap_region_when_needed() {
         unsafe {
-            let mut allocator = MmapAllocator::new();
+            let allocator = MmapAllocator::new();
             let layout = Layout::new::<u64>();
 
             let p1 = allocator.alloc(layout);
             let p2 = allocator.alloc(layout);
 
-            assert!(!allocator.allocator.regions.is_empty());
+            {
+                // We need to use this inner scope because the mutex needs to be
+                // droped so that `deallocate` can take the lock.
+                let kernel = allocator.allocator.lock().unwrap();
+                assert!(!kernel.regions.is_empty());
+            }
             
-            allocator.dealloc(p1);
-            allocator.dealloc(p2);
+            allocator.deallocate(p1);
+            allocator.deallocate(p2);
 
-            assert!(allocator.allocator.regions.is_empty());
+            {
+                let kernel = allocator.allocator.lock().unwrap();
+                assert!(kernel.regions.is_empty());
+            }
+
         }
     }
 }
