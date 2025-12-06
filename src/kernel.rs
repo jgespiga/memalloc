@@ -171,7 +171,7 @@ mod windows {
         /// Caller must ensure `addr` is a valid pointer returned by `request_memory`
         /// and has not been freed yet.
         unsafe fn return_memory(addr: *mut u8, _len: usize) {
-            unsafe { Memory::VirtualFree(addr as *mut c_void, 0, Memory::MEM_RELEASE); }
+            unsafe { let _ = Memory::VirtualFree(addr as *mut c_void, 0, Memory::MEM_RELEASE); }
         }
 
         unsafe fn page_size() -> usize {
