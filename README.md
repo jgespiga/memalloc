@@ -1,6 +1,6 @@
 # MemAlloc
 
-Memory allocator written in Rust for learning purposes. The memory is requested from the kernel using [`mmap`](https://man7.org/linux/man-pages/man2/mmap.2.html) syscalls.
+Custom general purpose Memory allocator written in Rust. The memory is requested from the kernel using [`mmap`](https://man7.org/linux/man-pages/man2/mmap.2.html) syscalls on Unix and [`VirtualAlloc`](https://learn.microsoft.com/es-es/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc) on Windows.
 
 Run the examples:
 
