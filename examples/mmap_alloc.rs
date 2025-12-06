@@ -1,5 +1,5 @@
 use std::{alloc::Layout};
-use memalloc::MmapAllocator;
+use memalloc::MemAlloc;
 
 fn log_alloc(addr: *mut u8, layout: Layout) {
     println!("Requested {} bytes of memory", layout.size());
@@ -7,7 +7,7 @@ fn log_alloc(addr: *mut u8, layout: Layout) {
 }
 fn main() {
     unsafe {
-        let allocator = MmapAllocator::new();
+        let allocator = MemAlloc::new();
     
         let layout1 = Layout::new::<u8>();
         let addr1 = allocator.allocate(layout1);

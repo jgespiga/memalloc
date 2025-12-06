@@ -7,4 +7,4 @@ mod utils;
 mod memalloc;
 
 
-pub use memalloc::MmapAllocator;
+pub use memalloc::MemAlloc;

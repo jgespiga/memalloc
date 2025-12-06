@@ -274,9 +274,10 @@ mod tests {
             list.append(42, mem);
 
             assert_eq!(list.len(), 1);
+
             assert!(!list.is_empty());
             
-            assert_eq!(list.head, list.tail);
+            assert_eq!(list.first(), list.last());
             
             assert_eq!(list.head.unwrap().as_ref().data, 42);
             

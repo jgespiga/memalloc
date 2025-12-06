@@ -2,10 +2,9 @@
 //! This are functions that don't particularly belong to any concrete module of the program.
 
 
-
 /// It aligns `to_be_aligned` using `aligment`.
 /// 
-/// This method is used to align region sizes to be a multiple of [`MmapAllocator::page_size`]
+/// This method is used to align region sizes to be a multiple of [`crate::kernel::Kernel::page_size`]
 /// and pointers in blocks to be a multiple of the computer's pointer size because memory
 /// direcctions have to be aligned.
 pub fn align(to_be_aligned: usize, aligment: usize) -> usize {

@@ -12,7 +12,7 @@ pub(crate) static mut PAGE_SIZE: usize = 0;
 pub(crate) struct Kernel {
     /// Linked list of allocator memory [`Region`]
     pub regions: List<Region>,
-    /// Computer's page size (used for aligment). See [`MmapAllocator::align`]
+    /// Computer's page size (used for aligment). See [`MemAlloc::align`]
     pub page_size: usize,
     /// Linked list of free blocks identified by [`Block::is_free`]
     pub free_list: FreeList,
