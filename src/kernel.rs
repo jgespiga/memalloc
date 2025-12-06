@@ -1,5 +1,5 @@
 use std::{alloc::Layout, ptr::NonNull};
-use crate::{block::{BLOCK_HEADER_SIZE, Block}, freelist::FreeList, list::{List, Node}, mmap::MIN_BLOCK_SIZE, region::{REGION_HEADER_SIZE, Region}, utils::align};
+use crate::{block::{BLOCK_HEADER_SIZE, Block}, freelist::FreeList, list::{List, Node}, memalloc::MIN_BLOCK_SIZE, region::{REGION_HEADER_SIZE, Region}, utils::align};
 
 /// Virtual memory page siz of the computer. This is usually 4096.
 /// This value should be a constant, but we can't do that since we 
@@ -67,8 +67,22 @@ mod unix {
     use std::{os::raw::{c_void, c_int}, ptr::{NonNull}};
 
     impl PlatformMemory for Kernel {
+        /// Request a raw chunk of memory from the operating system using `mmap`.
+        /// 
+        /// This function requests a new memory mapping that is:
+        /// - Readable and Writable
+        /// - Anonymous
+        /// - Private
+        /// 
+        /// # Arguments
+        /// 
+        /// `len` - The size of the memory region to request in bytes.
+        /// 
+        /// # Safety
+        /// 
+        /// It performs a raw system call. The returned memory is uninitialized.
         unsafe fn request_memory(len: usize) -> Option<NonNull<u8>> {
-            // mmap parameters.
+            // mmap parameters
             const ADDR: *mut c_void = std::ptr::null_mut::<c_void>();
             // Read-Write only memory.
             const PROT: c_int = libc::PROT_READ | libc::PROT_WRITE;
@@ -86,10 +100,21 @@ mod unix {
             }
         }
 
+        /// Releases a previously allocated memory segment back to the operating system.
+        /// 
+        /// This function wraps the `munmap` system call.
+        /// 
+        /// # Safety
+        /// 
+        /// The caller must ensure that:
+        /// - `addr` is a valid pointer previously returned by `request_memory`
+        /// - `len` matches the size of the mapping to be unmapped
+        /// - The memory at `addr` is not accessed after this call (Which will result in Use-After-Free errors)
         unsafe fn return_memory(addr: *mut u8, len: usize) {
             unsafe { munmap(addr as *mut c_void, len as size_t); }
         }
 
+        /// Returns the system's virtual memory page size in bytes.
         unsafe fn page_size() -> usize {
             unsafe { libc::sysconf(libc::_SC_PAGE_SIZE) as usize }
         }
@@ -105,10 +130,19 @@ mod windows {
     use windows::Win32::System::{Memory, SystemInformation};
 
     impl PlatformMemory for Kernel {
+        /// Requests memory from the Windows Operating System.
+        /// 
+        /// This implementation uses `VirtualAlloc` to reserve and commit memory
+        /// in a single step.
+        /// 
+        /// # Arguments
+        /// 
+        /// - `len` - The number of bytes to allocate.
         unsafe fn request_memory(len: usize) -> Option<std::ptr::NonNull<u8>> {
             // Read-Write only.
             let protection = Memory::PAGE_READWRITE;
-
+            
+            // Reserve address space and commit physical storage immediately.
             let flags = Memory::MEM_RESERVE | Memory::MEM_COMMIT;
 
             unsafe {
@@ -118,6 +152,24 @@ mod windows {
             }
         }
 
+        /// Release a memory region previously allocated by `VirtualAlloc`.
+        /// 
+        /// This function wraps `Virtuall`.
+        /// 
+        /// # Windows Specific Behavior
+        ///
+        /// According to the Microsoft documentation for `VirtualFree` with `MEM_RELEASE`:
+        /// 
+        /// - "If the dwFreeType parameter is MEM_RELEASE, this parameter [dwSize] 
+        /// - must be 0 (zero). The function frees the entire region that is reserved 
+        /// - in the initial allocation call to VirtualAlloc."
+        /// 
+        /// Therefore, `_len` is ignored to prevent `VirtualFree` from failing.
+        ///
+        /// # Safety
+        ///
+        /// Caller must ensure `addr` is a valid pointer returned by `request_memory`
+        /// and has not been freed yet.
         unsafe fn return_memory(addr: *mut u8, _len: usize) {
             unsafe { Memory::VirtualFree(addr as *mut c_void, 0, Memory::MEM_RELEASE); }
         }
@@ -214,8 +266,9 @@ impl Kernel {
         Ok(())
     }
 
-    /// Checks if the given `region` needs to be returned to the OS or not while managing
-    /// the free_list and the state of `block` which might be the only block left in the region.
+    /// Checks if the given `region` needs to be returned to the OS or not.
+    ///  
+    /// It manages the free_list and the state of `block` which might be the only block left in the region.
     /// We need this `block` since, if we were to munmap this region, we also need to remove that block
     /// from out free_list to avoid future problems. If we didn't do that, our allocator could think that
     /// this `block` stills free and therefor it will try to use it, causing undefined behavior.

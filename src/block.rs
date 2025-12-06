@@ -13,17 +13,28 @@ pub(crate) const BLOCK_HEADER_SIZE: usize = mem::size_of::<Node<Block>>();
 /// wrapped inside a [`Node`]
 /// 
 /// ```text
-/// +----------------+        +
-/// |      size      |        |
-/// +----------------+        |
-/// |   is_free (1b) |        | -> Header
-/// +----------------+        |
-/// |     region     |        |
-/// +----------------+        +       
-/// |     Content    |
-/// |                |
-/// +----------------+
+/// +---------------------+ <------+        
+/// |        size         |        |
+/// +---------------------+        |
+/// |    is_free (1b)     |        | -> Header
+/// +---------------------+        |
+/// |       region        |        |
+/// +---------------------+ <------+
+/// |       Content       |        |
+/// |         ...         |        | 
+/// |         ...         |        | -> Addressable content
+/// |         ...         |        |
+/// |                     |        |
+/// +---------------------+ <------+
 /// ```
+/// 
+/// As always take we need to take into account that every memory address needs to be
+/// aligned for CPU efficiency. The reason behind this is that processors fetch data in
+/// fixed-size chunks (depending on the word's size of the computer) rather than byte by byte.
+/// Therefor, we need to have this in mind every time we create a new block. When we add the 
+/// Header to the content we need to align that to the computer's word size.
+/// 
+/// See [`crate::utils::align`] to see how this is done.
 pub(crate) struct Block {
     /// Size of the block.
     pub size: usize, 
@@ -31,9 +42,4 @@ pub(crate) struct Block {
     pub is_free: bool,
     /// Region which the block belongs to
     pub region: NonNull<Node<Region>>,
-}
-
-impl Block {
-
-
 }

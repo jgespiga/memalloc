@@ -1,6 +1,5 @@
 use std::{marker::PhantomData, ptr::NonNull};
 
-
 /// Non-null pointer to `T`.
 pub(crate) type Link<T> = Option<NonNull<T>>;
 
@@ -13,8 +12,11 @@ pub(crate) struct Node<T> {
     pub data: T,
 }
 pub(crate) struct List<T> {
+    /// First element of the list
     head: Link<Node<T>>,
+    /// Last element of the list
     tail: Link<Node<T>>,
+    /// Number of nodes on the list
     len: usize,
     marker: PhantomData<T>,
 }
@@ -27,6 +29,7 @@ pub struct Iter<'a, T> {
 
 
 impl<T> List<T> {
+    /// Creates a new empty list.
     pub fn new() -> Self {
         Self {
             head: None,
@@ -36,21 +39,25 @@ impl<T> List<T> {
         }
     }
 
+    /// Returns the length of the list
     #[inline]
     pub fn len(&self) -> usize {
         self.len
     }
 
+    /// Returns the first element on the list
     #[inline]
     pub fn first(&self) -> Link<Node<T>> {
         self.head
     }
 
+    /// Returns the last element of the list
     #[inline]
     pub fn last(&self) -> Link<Node<T>> {
         self.tail
     }
 
+    /// Returns `true` if the list is empty
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.len == 0
@@ -89,9 +96,19 @@ impl<T> List<T> {
         }
     }
 
-    /// Inserts a new block right after the given `node` in the list. 
+    /// Inserts a new block right after the given `node` in the list.
     /// 
-    /// **SAFETY**: Caller must guarantee that `node` is an actual block of the list.
+    /// This function is pretty convinient when performing the block splitting algorithm, since
+    /// it can insert a node after a given one without having to iterate through the whole list
+    /// every time.
+    /// 
+    /// See [`crate::kernel::Kernel::take_from_block`] for a use case.
+    /// 
+    /// # Safety
+    /// 
+    /// Caller must guarantee that:
+    /// - `node` is an actual block of the list.
+    /// - `addr` is actually a valid address we can use.
     pub unsafe fn insert_after(
         &mut self, 
         mut node: NonNull<Node<T>>, 
@@ -122,6 +139,27 @@ impl<T> List<T> {
         }
     } 
 
+    /// Removes the given `node` from the list.
+    /// 
+    /// ```text
+    /// 
+    /// Before:
+    /// [prev] <-> [node] <-> [next]
+    /// 
+    /// After:
+    /// [prev] <-> [next]
+    /// 
+    /// ```
+    /// 
+    /// It also reduces the lists `len` by one.
+    /// 
+    /// # Safety
+    /// 
+    /// Caller must guarantee the following:
+    /// 
+    /// - `node` must be a valid pointer.
+    /// - The given `node` must be part of the current instance of `List`. If we try to remove
+    ///   a node which belongs to another list we will cause UB.
     pub unsafe fn remove(&mut self, node: NonNull<Node<T>>) {
         unsafe {
             let prev = node.as_ref().prev;

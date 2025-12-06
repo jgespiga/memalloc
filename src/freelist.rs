@@ -3,7 +3,7 @@ use std::{alloc::Layout, mem, ptr::NonNull};
 use crate::{
     block::Block,
     list::{Link, List, Node},
-    mmap::MIN_BLOCK_SIZE,
+    memalloc::MIN_BLOCK_SIZE,
     utils::align,
 };
 
@@ -61,10 +61,13 @@ use crate::{
 /// |                        |
 /// |      Free Payload      |
 /// |        (unused)        |
-/// |                        |
+/// |          ...           |
+/// |          ...           |
+/// |          ...           |
 /// +------------------------+
 /// ```
 pub(crate) struct FreeList {
+    /// Nodes of the list (Pointers to <Node<Block>>)
     pub items: List<NonNull<Node<Block>>>,
 }
 
