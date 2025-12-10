@@ -30,7 +30,7 @@ pub struct Iter<'a, T> {
 
 impl<T> List<T> {
     /// Creates a new empty list.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             head: None,
             tail: None,

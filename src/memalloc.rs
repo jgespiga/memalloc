@@ -58,7 +58,7 @@ pub struct MemAlloc {
 
 impl MemAlloc {
     /// Construct a new allocator by constructing its `Kernel`
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self { allocator: Mutex::new(Kernel::new()) }
     }
 

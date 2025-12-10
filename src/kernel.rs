@@ -185,20 +185,23 @@ mod windows {
     }
 }
 
+unsafe impl Send for Kernel {}
+unsafe impl Sync for Kernel {}
+
 impl Kernel {
     /// Create a new instance of the allocator's `Kernel`. 
     /// 
     /// When created, it will calculate the computer's page size and 
     /// initialize both the free list and the regions list to be 
     /// new empty [`FreeList`] and [`List`] datastructures.
-    pub(crate) fn new() -> Self {
-        page_size();
-        unsafe {
-            Self {
-                regions: List::new(),
-                page_size: PAGE_SIZE, 
-                free_list: FreeList::new()
-            }
+    /// 
+    /// We set the page_size to 0 in order to be able to make this constructor `const`.
+    /// We will set the page_size later in [`Kernel::allocate_new_region`]
+    pub(crate) const fn new() -> Self {
+        Self {
+            regions: List::new(),
+            page_size: 0, 
+            free_list: FreeList::new()
         }
     }
 
@@ -212,6 +215,11 @@ impl Kernel {
     /// 
     /// This implementation is platform-dependant. It only works on linux right now.
     pub(crate) fn allocate_new_region(&mut self, layout: Layout) -> Result<(), &'static str> {
+
+        if self.page_size == 0 {
+            page_size();
+            unsafe { self.page_size = PAGE_SIZE; }
+        }
 
         // What we really need to allocate is the requested size (aligned)
         // plus the overhead introduced by out allocator's data structures

@@ -73,7 +73,7 @@ pub(crate) struct FreeList {
 
 impl FreeList {
     /// Creates a new empty List
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         return Self { items: List::new() };
     }
 
