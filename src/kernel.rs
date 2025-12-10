@@ -1,4 +1,4 @@
-use std::{alloc::Layout, ptr::NonNull};
+use std::{alloc::Layout, f32::MIN, mem, ptr::NonNull};
 use crate::{block::{BLOCK_HEADER_SIZE, Block}, freelist::FreeList, list::{List, Node}, memalloc::MIN_BLOCK_SIZE, region::{REGION_HEADER_SIZE, Region}, utils::align};
 
 /// Virtual memory page siz of the computer. This is usually 4096.
@@ -335,53 +335,50 @@ impl Kernel {
         unsafe {
             
             // Payload size aligned
-            let layout_size = align(requested_size, std::mem::size_of::<usize>());
+            let layout_size = align(requested_size, mem::size_of::<usize>());
             
             // For small memory requests, the requested size is going to be MIN_BLOCK_SIZE anyway.
             let requested = std::cmp::max(layout_size, MIN_BLOCK_SIZE);
             
-            // Calculate what the remaining size would be if we used this block
-            let remaining = block.as_ref().data.size.saturating_sub(requested);
+            // Calculate the offset where next header will start
+            let split_offset = align(BLOCK_HEADER_SIZE + requested, mem::size_of::<usize>());
 
-            // We take the block out of the Free List
-            self.free_list.remove_free_block(block);
-            
-            // We are going to use this block, so we marked as used
-            block.as_mut().data.is_free = false;
-            
-            if remaining > BLOCK_HEADER_SIZE + MIN_BLOCK_SIZE {
-                // We have to split the block
-                let new_node_addr: NonNull<u8> = 
-                    NonNull::new_unchecked((block.as_ptr() as *mut u8)
-                    .add(BLOCK_HEADER_SIZE + requested));
+            // Check if we can actualy split
+            let total = block.as_ref().data.size + BLOCK_HEADER_SIZE;
 
-                let new_block_size = remaining - BLOCK_HEADER_SIZE;
-                
-                let region = block.as_mut().data.region.as_mut();
+            // The remaining space must be enough for a header + `MIN_BLOCK_SIZE`
+            if total >= split_offset + BLOCK_HEADER_SIZE + MIN_BLOCK_SIZE {
+                let remaining = total - split_offset - BLOCK_HEADER_SIZE;
 
-                let new_block = region.data.blocks.insert_after(
-                    block,
+                // We take the block out of the Free List before modifying it
+                self.free_list.remove_free_block(block);
+                block.as_mut().data.is_free = false;
+
+                let new_node_addr = NonNull::new_unchecked((block.as_ptr() as *mut u8).add(split_offset));
+
+                // Adjust block size so that it ends just before the new one
+                block.as_mut().data.size = split_offset - BLOCK_HEADER_SIZE;
+
+                let mut region = block.as_mut().data.region;
+                let new_block = region.as_mut().data.blocks.insert_after(
+                    block, 
                     Block {
-                        size: new_block_size,
+                        size: remaining,
                         is_free: true,
-                        region: block.as_mut().data.region,
-                    },
+                        region,
+                    }, 
                     new_node_addr.cast()
                 );
-                
-                // We use the free block payload
-                let free_block_addr = 
-                NonNull::new_unchecked((new_block.as_ptr() as *mut u8)
-                .add(BLOCK_HEADER_SIZE));
-            
-                self.free_list.insert_free_block(new_block, free_block_addr);
+
+                let free_payload_addr = new_node_addr.add(BLOCK_HEADER_SIZE);
+                self.free_list.insert_free_block(new_block, free_payload_addr);
             } else {
-                // Splitting is not worth it
+                // There is no space for splitting so we use the whole block
+                self.free_list.remove_free_block(block);
                 block.as_mut().data.is_free = false;
             }
 
-            // We return a pointer to the payload.
-            // This is the address where the user will place content
+            // We return a pointer to the payload (just after de header).
             (block.as_ptr() as *mut u8).add(BLOCK_HEADER_SIZE)
         }
     }

@@ -36,7 +36,7 @@ pub struct Region {
 impl Region {
     /// Tries to merge the given block `node` with the previous one
     /// on the list. This can be performed if that previos block is free.
-    pub(crate) fn merge_with_prev(&mut self, node: &mut NonNull<Node<Block>>) {
+    pub(crate) fn merge_with_prev(&mut self, node: &mut NonNull<Node<Block>>, free_list: &mut FreeList) {
         unsafe {
             let block = &mut node.as_mut().data;
 
@@ -47,15 +47,23 @@ impl Region {
                 if prev_block.is_free {
                     // As prev_block is already in the `free list` we just need to increment its size
                     // and remove its adjacent block with which we are going to merge this one from the list
-                    
+
+                    // We extract the previous one from the free_list temporarily, this avoids corruption problems.
+                    free_list.remove_free_block(prev_node);
+
                     // We need to cover the header and the actual content of the block
                     prev_block.size += BLOCK_HEADER_SIZE + block.size;
                     
                     // We remove the block from the list since it is going to be merged
                     //region.as_mut().data.blocks.remove(node);
                     self.blocks.remove(*node);
+
                     // The current block is now its previous one
                     *node = prev_node;
+
+                    // We insert the expanded block on the free list
+                    //let free_payload_addr = prev_node.as_ptr().cast::<u8>().add(BLOCK_HEADER_SIZE);
+                    //free_list.insert_free_block(prev_node, NonNull::new_unchecked(free_payload_addr));
                 }
             }
         }
@@ -69,9 +77,8 @@ impl Region {
                 let next_block = &mut next_node.as_mut().data;
 
                 if next_block.is_free {
-                    if next_block.size >= MIN_BLOCK_SIZE {
-                       free_list.remove_free_block(next_node);
-                    }
+                    // The current block should already be on the free_list, so we just need to absorb the next one.
+                    free_list.remove_free_block(next_node);
 
                     node.as_mut().data.size += BLOCK_HEADER_SIZE + next_block.size;
                     // We remove the block from the list since it is going to be merged                   

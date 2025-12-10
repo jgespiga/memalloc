@@ -118,24 +118,29 @@ impl MemAlloc {
             // Block data
             let block = &mut block_node.as_mut().data;
 
-            // I'm not sure how to use layout here. We can just check if the user is
-            // trying to deallocate more memory than the block has
-            assert!(block.size >= layout.size());
             // If it is already free, we don't do anything
             if block.is_free {
                 return;
             }
 
-            // We mark the block as free to use
+            // Mark the block as free to use
             block.is_free = true;
+
+            // I'm not sure how to use layout here. We can just check if the user is
+            // trying to deallocate more memory than the block has
+            assert!(block.size >= layout.size());
 
             let mut region = block.region;
 
             // Try to merge the block with the previous one.
-            region.as_mut().data.merge_with_prev(&mut block_node);
+            region.as_mut().data.merge_with_prev(&mut block_node, &mut kernel.free_list);
 
             // Try to merge the block with the next one.
             region.as_mut().data.merge_with_next(&mut block_node, &mut kernel.free_list);
+
+            // We re-insert the resulting block on the free list
+            let free_node_addr = block_node.as_ptr().cast::<u8>().add(BLOCK_HEADER_SIZE);
+            kernel.free_list.insert_free_block(block_node, NonNull::new_unchecked(free_node_addr));
 
             // Check if we need to remove and munmap the current `region`
             kernel.check_region_removal(&mut region, block_node);
