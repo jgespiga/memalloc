@@ -1,4 +1,4 @@
-use std::{alloc::Layout, f32::MIN, mem, ptr::NonNull};
+use std::{alloc::Layout, mem, ptr::NonNull};
 use crate::{block::{BLOCK_HEADER_SIZE, Block}, freelist::FreeList, list::{List, Node}, memalloc::MIN_BLOCK_SIZE, region::{REGION_HEADER_SIZE, Region}, utils::align};
 
 /// Virtual memory page siz of the computer. This is usually 4096.
@@ -330,15 +330,26 @@ impl Kernel {
     /// to the actual [`Region::blocks`], since it is a new block of the current region
     /// 
     /// The payload of the free block is used to store the data we need. See [`FreeList`] for greater detail.
-    pub(crate) unsafe fn take_from_block(&mut self, mut block: NonNull<Node<Block>>, requested_size: usize) -> *mut u8 {
+    pub(crate) unsafe fn take_from_block(&mut self, mut block: NonNull<Node<Block>>, layout: Layout) -> *mut u8 {
         
         unsafe {
             
+            let requested_size = layout.size();
+            let aligned_requested = layout.align();
+
             // Payload size aligned
-            let layout_size = align(requested_size, mem::size_of::<usize>());
+            let raw_payload_ptr = (block.as_ptr() as *mut u8).add(BLOCK_HEADER_SIZE);
+
+            // Aligned pointer we will return
+            let aligned_ptr  = align(raw_payload_ptr as usize, aligned_requested) as *mut u8;
             
+            // Calculate padding: space between header and aligned data
+            let padding = aligned_ptr.offset_from(raw_payload_ptr) as usize;
+
+            let layout_size = align(requested_size, mem::size_of::<usize>());
+
             // For small memory requests, the requested size is going to be MIN_BLOCK_SIZE anyway.
-            let requested = std::cmp::max(layout_size, MIN_BLOCK_SIZE);
+            let requested = std::cmp::max(layout_size + padding, MIN_BLOCK_SIZE);
             
             // Calculate the offset where next header will start
             let split_offset = align(BLOCK_HEADER_SIZE + requested, mem::size_of::<usize>());
@@ -378,8 +389,14 @@ impl Kernel {
                 block.as_mut().data.is_free = false;
             }
 
-            // We return a pointer to the payload (just after de header).
-            (block.as_ptr() as *mut u8).add(BLOCK_HEADER_SIZE)
+            // As we have introduced a padding, when we want to deallocate, we need to know where the
+            // actual header is regardless how many padding we have. Therefor, we are going to store
+            // a pointer to this header just before the address we give the user.
+            let header_ref_ptr = (aligned_ptr as *mut usize).sub(1);
+            *header_ref_ptr = block.as_ptr() as usize;
+
+            // We return an aligned pointer to the payload
+            aligned_ptr
         }
     }
 }

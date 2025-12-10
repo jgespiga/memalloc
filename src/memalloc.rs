@@ -88,7 +88,7 @@ impl MemAlloc {
 
         // It doesn't have any sense to call this function unless `block` is not None
         if let Some(block) = block {
-            unsafe { kernel.take_from_block(block, layout.size()) } 
+            unsafe { kernel.take_from_block(block, layout) } 
         } else {
             // Error?
             panic!("Todo");
@@ -110,10 +110,11 @@ impl MemAlloc {
         };
         
         unsafe {
-            // We assume this part is a `header`, if it isn't, this will be UB
-            let block_node_ptr = ptr.sub(BLOCK_HEADER_SIZE) as *mut Node<Block>;
-            
-            let mut block_node = NonNull::new_unchecked(block_node_ptr);
+            // We read the pointer stored just before the payload.
+            let header_ptr = (ptr as *mut usize).sub(1).read() as *mut Node<Block>;
+
+            // We assume this is a `header`, if it isn't, this will be UB
+            let mut block_node = NonNull::new_unchecked(header_ptr);
 
             // Block data
             let block = &mut block_node.as_mut().data;
@@ -296,4 +297,26 @@ mod tests {
 
         }
     }
+
+    #[test]
+    fn multiple_regions_allocation() {
+        unsafe {
+            let allocator = MemAlloc::new();
+            // We suppose 4096 bytes pages.
+            let layout = Layout::from_size_align(3000, 8).unwrap();
+            
+            let p1 = allocator.allocate(layout);
+            // This should create a new error  
+            let p2 = allocator.allocate(layout);
+            
+            assert!(!p1.is_null());
+            assert!(!p2.is_null());
+            assert_ne!(p1, p2);
+
+            allocator.deallocate(p1, layout);
+            allocator.deallocate(p2, layout);
+        }
+    }
+
+   
 }
