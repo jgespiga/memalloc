@@ -42,6 +42,7 @@ impl MemAlloc {
     /// if it is neccessary.
     /// 
     /// # Safety
+    /// 
     /// This function is unsafe since it deals with raw pointers and manual memory management.
     /// The returned raw pointer is guaranteed to be:
     /// - Non-null (unless an internall failure occurs which we can't handle)
@@ -164,6 +165,7 @@ impl MemAlloc {
     /// As an idea, this implementation can be improved by growing or shrinking the given block.
     /// 
     /// # Safety
+    /// 
     /// Same safety requirements as [`MemAlloc::allocate`] and [`MemAlloc::deallocate`]
     #[inline]
     pub unsafe fn reallocate(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
@@ -404,6 +406,139 @@ mod tests {
             assert_eq!(p1 as usize % 64, 0);
             
             allocator.deallocate(p1, layout);
+        }
+    }
+
+    #[test]
+    fn realloc_grow_preserves_data() {
+        let allocator = MemAlloc::new();
+
+        unsafe {
+            // 8 bytes
+            let layout = Layout::from_size_align(8, 4).unwrap();
+            let ptr = allocator.allocate(layout) as *mut u32;
+
+            assert!(!ptr.is_null());
+
+            // We write known data
+            *ptr = 0xDEADBEEF;
+            *ptr.add(1) = 0xCAFEBABE;
+
+            // Reallocate (16 bytes)
+            let new_size = 16;
+            let new_ptr = allocator.reallocate(ptr as *mut u8, layout, new_size) as *mut u32;
+
+            assert!(!new_ptr.is_null());
+            
+            // Verify old data stills there
+            assert_eq!(*new_ptr, 0xDEADBEEF);
+            assert_eq!(*new_ptr.add(1), 0xCAFEBABE);
+
+            // Verify we can write in the new addr
+            *new_ptr.add(2) = 0x00C0FFEE;
+            *new_ptr.add(3) = 0x12345678;
+
+            let new_layout = Layout::from_size_align(new_size, 4).unwrap();
+            allocator.deallocate(new_ptr as *mut u8, new_layout);
+        }
+    }
+
+    #[test]
+    fn realloc_shrink_truncates_data() {
+        let allocator = MemAlloc::new();
+
+        unsafe {
+            // 32 bytes
+            let layout = Layout::from_size_align(32, 8).unwrap();
+            let ptr = allocator.allocate(layout) as *mut u64;
+
+            ptr.write(10);
+            ptr.add(1).write(20);
+            ptr.add(2).write(30);
+            ptr.add(3).write(40);
+
+            // Reduce to 16 bytes
+            let new_size = 16;
+            let new_ptr = allocator.reallocate(ptr as *mut u8, layout, new_size) as *mut u64;
+
+            assert!(!new_ptr.is_null());
+
+            // Verify copy
+            assert_eq!(*new_ptr, 10);
+            assert_eq!(*new_ptr.add(1), 20);
+
+            let new_layout = Layout::from_size_align(new_size, 8).unwrap();
+            allocator.deallocate(new_ptr as *mut u8, new_layout);
+        }
+    }
+
+    #[test]
+    fn realloc_null_ptr_acts_as_alloc() {
+        let allocator = MemAlloc::new();
+
+        unsafe {
+            // This layout is important for alignment
+            let layout = Layout::from_size_align(16, 8).unwrap(); 
+
+            // This should behave as an allocation
+            let ptr = allocator.reallocate(ptr::null_mut(), layout, 16);
+
+            assert!(!ptr.is_null());
+            assert_eq!(ptr as usize % 8, 0, "No respetó la alineación al actuar como alloc");
+
+            allocator.deallocate(ptr, layout);
+        }
+    }
+
+    #[test]
+    fn realloc_zero_size_acts_as_dealloc() {
+        let allocator = MemAlloc::new();
+
+        unsafe {
+            let layout = Layout::new::<u32>();
+            let ptr = allocator.allocate(layout);
+
+            // This should deallocate and return null
+            let result = allocator.reallocate(ptr, layout, 0);
+
+            assert!(result.is_null());
+        }
+    }
+
+    #[test]
+    fn realloc_maintains_high_alignment() {
+        let allocator = MemAlloc::new();
+
+        unsafe {
+            let align = 128;
+            let layout = Layout::from_size_align(64, align).unwrap();
+            
+            let ptr = allocator.allocate(layout);
+            assert_eq!(ptr as usize % align, 0);
+
+            // Reasign
+            let new_size = 256;
+            let new_ptr = allocator.reallocate(ptr, layout, new_size);
+
+            assert!(!new_ptr.is_null());
+            // Verify alignment of new block
+            assert_eq!(new_ptr as usize % align, 0, "Realloc perdió la alineación estricta");
+
+            let new_layout = Layout::from_size_align(new_size, align).unwrap();
+            allocator.deallocate(new_ptr, new_layout);
+        }
+    }
+
+    #[test]
+    fn realloc_null_and_zero_returns_null() {
+        let allocator = MemAlloc::new();
+
+        unsafe {
+            let layout = Layout::new::<u8>();
+            
+            // Edge case: ptr null and size 0
+            let ptr = allocator.reallocate(ptr::null_mut(), layout, 0);
+            assert!(ptr.is_null());
         }
     }
 }
