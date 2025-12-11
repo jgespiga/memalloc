@@ -55,15 +55,10 @@ impl Region {
                     prev_block.size += BLOCK_HEADER_SIZE + block.size;
                     
                     // We remove the block from the list since it is going to be merged
-                    //region.as_mut().data.blocks.remove(node);
                     self.blocks.remove(*node);
 
                     // The current block is now its previous one
                     *node = prev_node;
-
-                    // We insert the expanded block on the free list
-                    //let free_payload_addr = prev_node.as_ptr().cast::<u8>().add(BLOCK_HEADER_SIZE);
-                    //free_list.insert_free_block(prev_node, NonNull::new_unchecked(free_payload_addr));
                 }
             }
         }

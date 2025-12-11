@@ -16,28 +16,7 @@ pub(crate) const MIN_BLOCK_SIZE: usize = mem::size_of::<Node<NonNull<Node<Block>
 
 
 
-/// Virtual memory layout of a process
-/// ```text
-/// +-------------------------+
-/// |   Kernel virtual memory |  | -> invisible to the user code
-/// +-------------------------+
-/// |                         |
-/// |          Stack          |
-/// |                         |
-/// +-------------------------+
-/// |                         |
-/// |                         |
-/// |                         |
-/// |                         |
-/// +-------------------------+
-/// |                         |
-/// |          Heap           |
-/// |                         |
-/// +-------------------------+
-/// 
-/// ... Read/write and Read-only segments
-/// 
-/// ```
+
 
 
 

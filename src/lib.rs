@@ -5,6 +5,31 @@
 //! [`VirtualAlloc`](https://learn.microsoft.com/es-es/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc)
 //! on Windows.
 //! 
+//! 
+//! Virtual memory layout of a process:
+//! 
+//! ```text
+//! +-------------------------+
+//! |   Kernel virtual memory |  | -> invisible to the user code
+//! +-------------------------+
+//! |                         |
+//! |          Stack          |
+//! |                         |
+//! +-------------------------+
+//! |                         |
+//! |                         |
+//! |                         |
+//! |                         |
+//! +-------------------------+
+//! |                         |
+//! |          Heap           |
+//! |                         |
+//! +-------------------------+
+//! 
+//! ... Read/write and Read-only segments
+//! 
+//! ```
+//! 
 //! The internal structure of the allocator looks like this:
 //! 
 //! ```text
