@@ -6,7 +6,7 @@
 /// 
 /// This method is used to align region sizes to be a multiple of [`crate::kernel::Kernel::page_size`]
 /// and pointers in blocks to be a multiple of the computer's pointer size because memory
-/// direcctions have to be aligned.
+/// address have to be aligned.
 pub fn align(to_be_aligned: usize, aligment: usize) -> usize {
     (to_be_aligned + aligment - 1) & !(aligment - 1)
 }
