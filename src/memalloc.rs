@@ -15,14 +15,6 @@ use crate::{
 pub(crate) const MIN_BLOCK_SIZE: usize = mem::size_of::<Node<NonNull<Node<Block>>>>(); 
 
 
-
-
-
-
-
-
-
-
 /// The main allocator's Struct. 
 /// 
 /// This is a wrapper over [`Kernel`], see that for more detail of the internals
@@ -36,12 +28,25 @@ pub struct MemAlloc {
 }
 
 impl MemAlloc {
-    /// Construct a new allocator by constructing its `Kernel`
+    /// Construct a new allocator by constructing its `Kernel`.
+    /// 
+    /// It initializes the `Kernel` inside a `Mutex` to allow safe concurrent access
     pub const fn new() -> Self {
         Self { allocator: Mutex::new(Kernel::new()) }
     }
 
-
+    /// Allocates memory according to the given `layout`.
+    /// 
+    /// It first searches for a suitable free block in `FreeList` using the First-Fit
+    /// strategy. If no block is found, it creates a new block or allocates a new `Region`
+    /// if it is neccessary.
+    /// 
+    /// # Safety
+    /// This function is unsafe since it deals with raw pointers and manual memory management.
+    /// The returned raw pointer is guaranteed to be:
+    /// - Non-null (unless an internall failure occurs which we can't handle)
+    /// - Aligned
+    /// - Containing at leas `layout.size()` bytes of usable memory.
     #[inline]
     pub unsafe fn allocate(&self, layout: Layout) -> *mut u8 {
 
@@ -69,12 +74,34 @@ impl MemAlloc {
         if let Some(block) = block {
             unsafe { kernel.take_from_block(block, layout) } 
         } else {
-            // Error?
-            panic!("Todo");
+            // As far as I'm concerned, this is an unrecoverable error, so the allocator should panic
+            panic!("Internal memory allocation failed");
         }
     }
     
-
+    /// Deallocates the memory in the given `ptr`.
+    /// 
+    /// Because `allocate` supports arbitrary alignment (e.g., 64 bytes), there might be 
+    /// a dynamic amount of padding between the `Node<Block>` header and the user's `ptr`.
+    /// 
+    /// To solve this, `allocate` stores the address of the `Node<Block>` in the 8 bytes 
+    /// (usize) immediately preceding `ptr`. This is called "Header Reflection". This
+    /// is also the main part where the user of the allocator can experiment UB.
+    /// 
+    /// ### Memory Layout:
+    /// 
+    /// ```text
+    /// [ Node<Block> ] [ ... Padding ... ] [ Ptr to Node ] [ User Data (ptr) ]
+    /// ^                                   ^               ^
+    /// |                                   |               |
+    /// Real Start                          (ptr - 8)       Returned to User
+    /// ```
+    /// 
+    /// # Safety
+    /// 
+    /// Caller must guarantee that:
+    /// - `ptr` was allocated by this allocator.
+    /// - `layout` is the same layout used for allocation.
     #[inline]
     pub unsafe fn deallocate(&self, ptr: *mut u8, layout: Layout) {
         if ptr.is_null() {
@@ -126,6 +153,58 @@ impl MemAlloc {
             kernel.check_region_removal(&mut region, block_node);
         }
     }
+
+    /// Reallocates the given `ptr` to `new_size`
+    /// 
+    /// This implementation is pretty simple by using an "Alloc-Copy-Dealloc" strategy:
+    /// - It allocates a new block of `new_size`
+    /// - Copy's de data of the old block to the new one
+    /// - Deallocates the old block
+    /// 
+    /// As an idea, this implementation can be improved by growing or shrinking the given block.
+    /// 
+    /// # Safety
+    /// Same safety requirements as [`MemAlloc::allocate`] and [`MemAlloc::deallocate`]
+    #[inline]
+    pub unsafe fn reallocate(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        if ptr.is_null() {
+            // We check different edge cases
+            if new_size == 0 {
+                return ptr::null_mut();
+            }
+            
+            unsafe {
+                let new_layout = Layout::from_size_align_unchecked(new_size, layout.align());
+                return self.alloc(new_layout);
+            }
+        }
+
+        if new_size == 0 {
+            // In this case the behaviour is the same as dealloc(ptr)
+            unsafe {
+                self.dealloc(ptr, layout);
+                return ptr::null_mut();
+            }
+        }
+        
+        unsafe {
+            let new_layout = Layout::from_size_align_unchecked(new_size, layout.align());
+            let new_ptr = self.alloc(new_layout);
+
+            if new_ptr.is_null() {
+                // There has been an error while trying to allocate
+                return ptr::null_mut();
+            }
+
+            let size_to_copy = std::cmp::min(layout.size(), new_size);
+            ptr::copy_nonoverlapping(ptr, new_ptr, size_to_copy);
+
+            // We can free the old block
+            self.dealloc(ptr, layout);
+
+            new_ptr
+        }
+    }
 }
 
 unsafe impl GlobalAlloc for MemAlloc {
@@ -149,6 +228,10 @@ unsafe impl GlobalAlloc for MemAlloc {
 
             ptr
         }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        unsafe { self.reallocate(ptr, layout, new_size) }
     }
 
 }
