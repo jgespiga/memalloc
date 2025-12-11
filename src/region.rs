@@ -1,6 +1,6 @@
 use std::{mem, ptr::NonNull};
 
-use crate::{block::{BLOCK_HEADER_SIZE, Block}, freelist::FreeList, list::{List, Node}, memalloc::MIN_BLOCK_SIZE};
+use crate::{block::{BLOCK_HEADER_SIZE, Block}, freelist::FreeList, list::{List, Node}};
 
 
 /// This is the overhead size introduced by the [`Region`] header in bytes.

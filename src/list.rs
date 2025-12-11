@@ -53,7 +53,8 @@ impl<T> List<T> {
 
     /// Returns the last element of the list
     #[inline]
-    pub fn last(&self) -> Link<Node<T>> {
+    #[cfg(test)]
+    fn last(&self) -> Link<Node<T>> {
         self.tail
     }
 
