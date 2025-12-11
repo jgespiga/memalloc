@@ -20,6 +20,9 @@ pub(crate) const BLOCK_HEADER_SIZE: usize = mem::size_of::<Node<Block>>();
 /// +---------------------+        |
 /// |       region        |        |
 /// +---------------------+ <------+
+/// |     Additional      |
+/// |      metadata       |
+/// +---------------------+ <------+                    
 /// |       Content       |        |
 /// |         ...         |        | 
 /// |         ...         |        | -> Addressable content
@@ -35,6 +38,15 @@ pub(crate) const BLOCK_HEADER_SIZE: usize = mem::size_of::<Node<Block>>();
 /// Header to the content we need to align that to the computer's word size.
 /// 
 /// See [`crate::utils::align`] to see how this is done.
+/// 
+/// As a side note, take into account that to keep every address alignment, blocks usually have
+/// a `padding` between the header and the content. This is the way to ensure that every used
+/// address is aligned. But after doing that, we face a problem: now we don't know where is the 
+/// actual `header` of the block since every block will have a different padding. To fix this,
+/// we will used a little bit of space just before the block's content to store a pointer to
+/// the header's address. By doing that, we can always locate the `header` by using that information.
+/// However that is also what can cause Undefined Behaviour since that pointer can have a memory address
+/// that isn't actually a `header`.
 pub(crate) struct Block {
     /// Size of the block.
     pub size: usize, 
