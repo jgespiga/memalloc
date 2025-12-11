@@ -318,5 +318,30 @@ mod tests {
         }
     }
 
-   
+    #[test]
+    fn zero_sized_type_allocation() {
+        unsafe {
+            let allocator = MemAlloc::new();
+            let layout = Layout::from_size_align(0, 1).unwrap();
+            
+            let p1 = allocator.allocate(layout);
+            // Generalmente devolvemos un puntero alineado mínimo o el bloque MIN_BLOCK_SIZE
+            assert!(!p1.is_null()); 
+            
+            allocator.deallocate(p1, layout);
+        }
+    }
+
+    #[test]
+    fn requested_high_alignment() {
+        unsafe {
+            let allocator = MemAlloc::new();
+            let layout = Layout::from_size_align(8, 64).unwrap();
+            
+            let p1 = allocator.allocate(layout);
+            assert_eq!(p1 as usize % 64, 0);
+            
+            allocator.deallocate(p1, layout);
+        }
+    }
 }
